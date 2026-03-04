@@ -1,0 +1,194 @@
+name: Fiverr Scraper (Direct + PIA VPN)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max
+
+    env:
+      DISPLAY: ":99"
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # ─── VIRTUAL DISPLAY ─────────────────────────────────────────
+      - name: Start Virtual Display
+        run: |
+          echo "🖥️ Installing Xvfb..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb xauth
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          echo "✅ Virtual display running on :99"
+
+      # ─── PYTHON SETUP ────────────────────────────────────────────
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install playwright requests certifi "camoufox[geoip]" browserforge
+          python -m playwright install firefox
+          python -m playwright install-deps firefox
+          python -m camoufox fetch
+          echo "✅ All dependencies installed"
+
+      # ─── PIA VPN SETUP ───────────────────────────────────────────
+      - name: Install PIA VPN
+        run: |
+          echo "🌐 Downloading PIA VPN..."
+          PIA_URL="https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pia-linux-3.7-08412.run"
+          PIA_INSTALLER="/tmp/pia-install.run"
+          curl -fSL "$PIA_URL" -o "$PIA_INSTALLER"
+          
+          FILE_SIZE=$(stat -c%s "$PIA_INSTALLER")
+          echo "📥 Downloaded: $(echo "scale=1; $FILE_SIZE / 1048576" | bc) MB"
+          if [ "$FILE_SIZE" -lt 1000000 ]; then
+            echo "❌ Download too small — likely failed"
+            exit 1
+          fi
+          
+          echo "📦 Installing PIA VPN..."
+          chmod +x "$PIA_INSTALLER"
+          sh "$PIA_INSTALLER" || true
+          
+          # ── Wait for daemon with retry (up to 60s) ──
+          echo "⏳ Waiting for PIA daemon to start..."
+          for i in $(seq 1 12); do
+            sleep 5
+            if systemctl is-active --quiet piavpn 2>/dev/null; then
+              echo "✅ PIA daemon is running (took ~$((i*5))s)"
+              break
+            fi
+            echo "   ⏳ Attempt $i/12 — daemon not ready yet..."
+          done
+          
+          # Verify daemon is actually running
+          if ! systemctl is-active --quiet piavpn 2>/dev/null; then
+            echo "⚠️ Daemon not running via systemctl, trying manual start..."
+            sudo systemctl start piavpn 2>/dev/null || true
+            sleep 5
+          fi
+          
+          # Find piactl binary
+          PIACTL=""
+          if command -v piactl &>/dev/null; then
+            PIACTL=$(command -v piactl)
+          elif [ -f "/opt/piavpn/bin/piactl" ]; then
+            PIACTL="/opt/piavpn/bin/piactl"
+          elif [ -f "/usr/local/bin/piactl" ]; then
+            PIACTL="/usr/local/bin/piactl"
+          fi
+          
+          if [ -n "$PIACTL" ]; then
+            echo "✅ PIA VPN installed at: $PIACTL"
+            "$PIACTL" --version || true
+          else
+            echo "❌ piactl not found after install"
+            sudo find / -name "piactl" -type f 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Login PIA VPN
+        run: |
+          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
+          
+          # Wait for daemon to be responsive (retry up to 30s)
+          for i in $(seq 1 6); do
+            if piactl background enable 2>/dev/null; then
+              echo "✅ PIA daemon responsive"
+              break
+            fi
+            echo "   ⏳ Daemon not responsive yet ($i/6)..."
+            sleep 5
+          done
+          
+          sleep 2
+          
+          # Login
+          CREDS_FILE=$(mktemp)
+          printf 'p8158950\nGoYoula@niba12$2323' > "$CREDS_FILE"
+          
+          # Retry login up to 3 times
+          for attempt in 1 2 3; do
+            if piactl login "$CREDS_FILE" 2>/dev/null; then
+              echo "✅ PIA logged in (attempt $attempt)"
+              rm -f "$CREDS_FILE"
+              break
+            fi
+            echo "   ⚠️ Login attempt $attempt failed, retrying..."
+            sleep 5
+          done
+          rm -f "$CREDS_FILE"
+          
+          echo "✅ PIA ready. VPN connect handled by Mainbot.py"
+
+      # ─── RUN THE SCRAPER ─────────────────────────────────────────
+      - name: Download Mainbot.py from R2
+        run: |
+          curl -fSL "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot.py" -o Mainbot.py
+          echo "✅ Downloaded Mainbot.py ($(stat -c%s Mainbot.py) bytes)"
+
+      - name: Run Scraper (background + watchdog)
+        env:
+          PIA_USERNAME: "p8158950"
+          PIA_PASSWORD: "GoYoula@niba12$2323"
+          FGOS_API_KEY: "fgos-scraper-key-2026-secure"
+        run: |
+          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
+          
+          echo "=========================================="
+          echo "  🚀 Starting Fiverr Scraper (Background)"
+          echo "=========================================="
+          
+          # ── Launch Mainbot.py in background, log to file ──
+          python Mainbot.py > /tmp/scraper.log 2>&1 &
+          BOT_PID=$!
+          echo "✅ Mainbot.py started (PID: $BOT_PID)"
+          echo "   Logs → /tmp/scraper.log"
+          
+          # ── Watchdog: keep runner alive while bot runs ──
+          # Prints a heartbeat every 5 min so GitHub doesn't kill for inactivity
+          # Exits when Mainbot.py finishes (success or crash)
+          MINUTES=0
+          while kill -0 "$BOT_PID" 2>/dev/null; do
+            sleep 300
+            MINUTES=$((MINUTES + 5))
+            
+            # Print heartbeat (prevents GitHub 10-min no-output timeout)
+            echo "💓 [$MINUTES min] Scraper still running (PID $BOT_PID)"
+            
+            # Show last 3 lines of log for quick status
+            tail -3 /tmp/scraper.log 2>/dev/null || true
+            echo ""
+          done
+          
+          # ── Bot finished — get exit code ──
+          wait "$BOT_PID"
+          EXIT_CODE=$?
+          
+          echo ""
+          echo "=========================================="
+          echo "  🏁 Scraper finished (exit code: $EXIT_CODE)"
+          echo "=========================================="
+          echo ""
+          echo "📋 Last 50 lines of log:"
+          tail -50 /tmp/scraper.log 2>/dev/null || true
+          
+          exit $EXIT_CODE
+
+      # ─── UPLOAD LOG AS ARTIFACT (always, even on failure) ────────
+      - name: Upload scraper log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-log-${{ github.run_id }}
+          path: /tmp/scraper.log
+          retention-days: 7
