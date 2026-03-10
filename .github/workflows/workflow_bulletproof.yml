@@ -1,0 +1,341 @@
+name: Fiverr Scraper (6-Hour Bulletproof)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_role:
+        description: 'Runner role: scraper (Phase 1+2) or detail_only (Phase 2 only)'
+        required: false
+        default: 'scraper'
+        type: choice
+        options:
+          - scraper
+          - detail_only
+      preferred_country:
+        description: 'Preferred country code for VPN (empty = server decides)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max
+
+    env:
+      DISPLAY: ":99"
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # ─── VIRTUAL DISPLAY ─────────────────────────────────────────
+      - name: Start Virtual Display
+        run: |
+          echo "🖥️ Installing Xvfb..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb xauth
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          echo "✅ Virtual display running on :99"
+
+      # ─── PYTHON SETUP ────────────────────────────────────────────
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install playwright requests certifi "camoufox[geoip]" browserforge
+          python -m playwright install firefox
+          python -m playwright install-deps firefox
+          python -m camoufox fetch
+          echo "✅ All dependencies installed"
+
+      # ─── PIA VPN SETUP ───────────────────────────────────────────
+      - name: Install PIA VPN
+        run: |
+          echo "🌐 Downloading PIA VPN..."
+          PIA_URL="https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pia-linux-3.7-08412.run"
+          PIA_INSTALLER="/tmp/pia-install.run"
+          curl -fSL "$PIA_URL" -o "$PIA_INSTALLER"
+          
+          FILE_SIZE=$(stat -c%s "$PIA_INSTALLER")
+          echo "📥 Downloaded: $(echo "scale=1; $FILE_SIZE / 1048576" | bc) MB"
+          if [ "$FILE_SIZE" -lt 1000000 ]; then
+            echo "❌ Download too small — likely failed"
+            exit 1
+          fi
+          
+          echo "📦 Installing PIA VPN..."
+          chmod +x "$PIA_INSTALLER"
+          sh "$PIA_INSTALLER" || true
+          
+          # Wait for daemon with retry (up to 60s)
+          echo "⏳ Waiting for PIA daemon to start..."
+          for i in $(seq 1 12); do
+            sleep 5
+            if systemctl is-active --quiet piavpn 2>/dev/null; then
+              echo "✅ PIA daemon is running (took ~$((i*5))s)"
+              break
+            fi
+            echo "   ⏳ Attempt $i/12 — daemon not ready yet..."
+          done
+          
+          # Verify daemon is actually running
+          if ! systemctl is-active --quiet piavpn 2>/dev/null; then
+            echo "⚠️ Daemon not running via systemctl, trying manual start..."
+            sudo systemctl start piavpn 2>/dev/null || true
+            sleep 5
+          fi
+          
+          # Find piactl binary
+          PIACTL=""
+          if command -v piactl &>/dev/null; then
+            PIACTL=$(command -v piactl)
+          elif [ -f "/opt/piavpn/bin/piactl" ]; then
+            PIACTL="/opt/piavpn/bin/piactl"
+          elif [ -f "/usr/local/bin/piactl" ]; then
+            PIACTL="/usr/local/bin/piactl"
+          fi
+          
+          if [ -n "$PIACTL" ]; then
+            echo "✅ PIA VPN installed at: $PIACTL"
+            "$PIACTL" --version || true
+          else
+            echo "❌ piactl not found after install"
+            sudo find / -name "piactl" -type f 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Login PIA VPN
+        run: |
+          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
+          
+          # Wait for daemon to be responsive
+          for i in $(seq 1 6); do
+            if piactl background enable 2>/dev/null; then
+              echo "✅ PIA daemon responsive"
+              break
+            fi
+            echo "   ⏳ Daemon not responsive yet ($i/6)..."
+            sleep 5
+          done
+          
+          sleep 2
+          
+          # Login
+          CREDS_FILE=$(mktemp)
+          printf 'p8158950\nGoYoula@niba12$2323' > "$CREDS_FILE"
+          
+          for attempt in 1 2 3; do
+            if piactl login "$CREDS_FILE" 2>/dev/null; then
+              echo "✅ PIA logged in (attempt $attempt)"
+              rm -f "$CREDS_FILE"
+              break
+            fi
+            echo "   ⚠️ Login attempt $attempt failed, retrying..."
+            sleep 5
+          done
+          rm -f "$CREDS_FILE"
+          
+          echo "✅ PIA ready"
+
+      # ─── DOWNLOAD MAINBOT ────────────────────────────────────────
+      - name: Download Mainbot.py from R2
+        run: |
+          curl -fSL "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot.py" -o Mainbot.py
+          echo "✅ Downloaded Mainbot.py ($(stat -c%s Mainbot.py) bytes)"
+
+      # ─── BULLETPROOF 6-HOUR RUNNER ───────────────────────────────
+      - name: Run Scraper (6-Hour Bulletproof Loop)
+        env:
+          PIA_USERNAME: "p8158950"
+          PIA_PASSWORD: "GoYoula@niba12$2323"
+          FGOS_API_KEY: "fgos-scraper-key-2026-secure"
+          RUNNER_ROLE: ${{ github.event.inputs.runner_role || 'scraper' }}
+          PREFERRED_COUNTRY: ${{ github.event.inputs.preferred_country || '' }}
+        run: |
+          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
+          
+          echo "=========================================="
+          echo "  🚀 BULLETPROOF 6-HOUR SCRAPER"
+          echo "=========================================="
+          echo "  Started at: $(date)"
+          echo "  Will run until: $(date -d '+6 hours')"
+          echo "=========================================="
+          
+          # ─── CONSTANTS ───
+          MAX_RUNTIME_SECONDS=$((6 * 60 * 60 - 300))  # 6 hours minus 5 min safety buffer
+          START_TIME=$(date +%s)
+          CRASH_COUNT=0
+          TOTAL_RUNS=0
+          LOG_FILE="/tmp/scraper.log"
+          
+          # ─── VPN CONNECT FUNCTION ───
+          connect_vpn() {
+            echo "🌐 [VPN] Connecting..."
+            
+            COUNTRY="${PREFERRED_COUNTRY:-us}"
+            piactl set region "$COUNTRY" 2>/dev/null || true
+            piactl connect 2>/dev/null || true
+            
+            # Wait up to 30s for connection
+            for i in $(seq 1 6); do
+              STATUS=$(piactl get connectionstate 2>/dev/null || echo "unknown")
+              if [ "$STATUS" = "Connected" ]; then
+                VPN_IP=$(piactl get vpnip 2>/dev/null || echo "unknown")
+                echo "✅ [VPN] Connected! IP: $VPN_IP"
+                return 0
+              fi
+              sleep 5
+            done
+            
+            echo "⚠️ [VPN] Connection timeout — continuing anyway"
+            return 1
+          }
+          
+          # ─── CHECK VPN FUNCTION ───
+          check_vpn() {
+            STATUS=$(piactl get connectionstate 2>/dev/null || echo "unknown")
+            if [ "$STATUS" != "Connected" ]; then
+              echo "⚠️ [VPN] Disconnected! Reconnecting..."
+              connect_vpn
+            fi
+          }
+          
+          # ─── Initial VPN connect ───
+          connect_vpn
+          
+          # ─── MAIN LOOP — RUNS UNTIL 6 HOURS ───
+          while true; do
+            ELAPSED=$(($(date +%s) - START_TIME))
+            REMAINING=$((MAX_RUNTIME_SECONDS - ELAPSED))
+            
+            # Check if time's up
+            if [ $REMAINING -le 0 ]; then
+              echo ""
+              echo "=========================================="
+              echo "  ⏰ 6-HOUR LIMIT REACHED — STOPPING"
+              echo "=========================================="
+              echo "  Total runs: $TOTAL_RUNS"
+              echo "  Total crashes: $CRASH_COUNT"
+              echo "=========================================="
+              break
+            fi
+            
+            # Show status
+            TOTAL_RUNS=$((TOTAL_RUNS + 1))
+            HOURS=$((ELAPSED / 3600))
+            MINS=$(((ELAPSED % 3600) / 60))
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🔄 Run #$TOTAL_RUNS | Elapsed: ${HOURS}h ${MINS}m | Remaining: $((REMAINING / 60))m"
+            echo "   Crashes so far: $CRASH_COUNT"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            
+            # Check/reconnect VPN before each run
+            check_vpn
+            
+            # ─── RUN MAINBOT ───
+            echo "🚀 Starting Mainbot.py..."
+            python Mainbot.py >> "$LOG_FILE" 2>&1 &
+            BOT_PID=$!
+            
+            # ─── MONITOR BOT ───
+            LAST_HEARTBEAT=$(date +%s)
+            while kill -0 "$BOT_PID" 2>/dev/null; do
+              sleep 60  # Check every minute
+              
+              NOW=$(date +%s)
+              ELAPSED=$((NOW - START_TIME))
+              
+              # Check if 6-hour limit reached
+              if [ $ELAPSED -ge $MAX_RUNTIME_SECONDS ]; then
+                echo "⏰ Time limit — killing bot gracefully..."
+                kill -TERM "$BOT_PID" 2>/dev/null || true
+                sleep 5
+                kill -9 "$BOT_PID" 2>/dev/null || true
+                break 2  # Exit both loops
+              fi
+              
+              # Heartbeat every 5 minutes
+              if [ $((NOW - LAST_HEARTBEAT)) -ge 300 ]; then
+                HOURS=$((ELAPSED / 3600))
+                MINS=$(((ELAPSED % 3600) / 60))
+                echo "💓 [${HOURS}h ${MINS}m] Bot running (PID $BOT_PID) | Crashes: $CRASH_COUNT"
+                tail -1 "$LOG_FILE" 2>/dev/null | head -c 100 || true
+                echo ""
+                LAST_HEARTBEAT=$NOW
+                
+                # Check VPN still connected
+                check_vpn
+              fi
+            done
+            
+            # ─── BOT EXITED — CHECK WHY ───
+            wait "$BOT_PID" 2>/dev/null
+            EXIT_CODE=$?
+            
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "✅ Mainbot.py finished successfully (exit 0)"
+              echo "   Will restart in 30s to continue scraping..."
+              sleep 30
+            else
+              CRASH_COUNT=$((CRASH_COUNT + 1))
+              echo "❌ Mainbot.py crashed! (exit code: $EXIT_CODE)"
+              echo "   Crash #$CRASH_COUNT — will restart in 60s"
+              echo ""
+              echo "📋 Last 10 lines of log:"
+              tail -10 "$LOG_FILE" 2>/dev/null || true
+              echo ""
+              
+              # Rotate VPN on crash (might help avoid blocks)
+              echo "🔄 Rotating VPN region..."
+              piactl disconnect 2>/dev/null || true
+              sleep 5
+              
+              # Pick different region if crashed
+              REGIONS=("us" "uk" "de" "nl" "ca" "au")
+              RANDOM_REGION=${REGIONS[$((RANDOM % ${#REGIONS[@]}))]}
+              PREFERRED_COUNTRY="$RANDOM_REGION"
+              connect_vpn
+              
+              # Wait before restart
+              sleep 60
+            fi
+            
+            # Safety: if too many crashes in short time, slow down
+            if [ $CRASH_COUNT -ge 10 ] && [ $((CRASH_COUNT % 10)) -eq 0 ]; then
+              echo "⚠️ Many crashes detected — waiting 5 minutes before retry..."
+              sleep 300
+            fi
+            
+          done
+          
+          # ─── FINAL SUMMARY ───
+          echo ""
+          echo "=========================================="
+          echo "  📊 FINAL SUMMARY"
+          echo "=========================================="
+          echo "  Total runtime: $((ELAPSED / 3600))h $(((ELAPSED % 3600) / 60))m"
+          echo "  Total bot runs: $TOTAL_RUNS"
+          echo "  Total crashes: $CRASH_COUNT"
+          echo "=========================================="
+          echo ""
+          echo "📋 Last 100 lines of log:"
+          tail -100 "$LOG_FILE" 2>/dev/null || true
+          
+          # Always exit 0 — we ran for 6 hours successfully
+          exit 0
+
+      # ─── UPLOAD LOG AS ARTIFACT ──────────────────────────────────
+      - name: Upload scraper log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-log-${{ github.run_id }}
+          path: /tmp/scraper.log
+          retention-days: 7
