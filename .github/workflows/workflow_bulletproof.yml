@@ -75,12 +75,10 @@ jobs:
           sudo unzip -o pia-configs.zip
           sudo rm pia-configs.zip
           
-          # Create auth file with credentials
+          # Create auth file with credentials (fixed - no heredoc)
           echo "🔐 Setting up authentication..."
-          sudo bash -c 'cat > /etc/openvpn/pia/auth.txt << EOF
-p8158950
-GoYoula@niba12$2323
-EOF'
+          echo "p8158950" | sudo tee /etc/openvpn/pia/auth.txt > /dev/null
+          echo "GoYoula@niba12\$2323" | sudo tee -a /etc/openvpn/pia/auth.txt > /dev/null
           sudo chmod 600 /etc/openvpn/pia/auth.txt
           
           # List available configs
@@ -121,7 +119,7 @@ EOF'
           OVPN_DIR="/etc/openvpn/pia"
           
           # Available regions (PIA OpenVPN config file names without .ovpn)
-          REGIONS=("us_california" "us_east" "us_west" "us_chicago" "us_texas" "us_florida" "us_atlanta" "uk_london" "de_berlin" "nl_amsterdam" "ca_toronto" "au_sydney")
+          REGIONS=("US California" "US East" "US West" "US Chicago" "US Texas" "US Florida" "US Atlanta" "UK London" "DE Berlin" "Netherlands" "CA Toronto" "AU Sydney")
           CURRENT_REGION=""
           
           # ─── VPN CONNECT FUNCTION (OpenVPN) ───
@@ -133,13 +131,13 @@ EOF'
               if [ -n "$PREFERRED_COUNTRY" ]; then
                 # Map country code to PIA config name
                 case "${PREFERRED_COUNTRY,,}" in
-                  us|usa) region="us_california" ;;
-                  uk|gb) region="uk_london" ;;
-                  de) region="de_berlin" ;;
-                  nl) region="nl_amsterdam" ;;
-                  ca) region="ca_toronto" ;;
-                  au) region="au_sydney" ;;
-                  *) region="us_california" ;;
+                  us|usa) region="US California" ;;
+                  uk|gb) region="UK London" ;;
+                  de) region="DE Berlin" ;;
+                  nl) region="Netherlands" ;;
+                  ca) region="CA Toronto" ;;
+                  au) region="AU Sydney" ;;
+                  *) region="US California" ;;
                 esac
               else
                 # Random region
@@ -154,23 +152,19 @@ EOF'
             sudo killall openvpn 2>/dev/null || true
             sleep 2
             
-            # Find the config file (try with and without spaces/underscores)
-            OVPN_FILE=""
-            for pattern in "$region" "${region//_/ }" "${region// /_}"; do
-              for f in "$OVPN_DIR"/*"$pattern"*.ovpn "$OVPN_DIR"/"$pattern".ovpn; do
-                if [ -f "$f" ]; then
-                  OVPN_FILE="$f"
-                  break 2
-                fi
-              done
-            done
-            
+            # Find the config file
+            OVPN_FILE=$(ls "$OVPN_DIR"/*.ovpn 2>/dev/null | grep -i "${region// /.}" | head -1)
             if [ -z "$OVPN_FILE" ]; then
-              echo "⚠️ [VPN] Config not found for $region, trying US California..."
-              OVPN_FILE=$(ls "$OVPN_DIR"/*california*.ovpn 2>/dev/null | head -1)
-              if [ -z "$OVPN_FILE" ]; then
-                OVPN_FILE=$(ls "$OVPN_DIR"/*.ovpn 2>/dev/null | head -1)
-              fi
+              # Try without dots
+              OVPN_FILE=$(ls "$OVPN_DIR"/*.ovpn 2>/dev/null | grep -i "${region}" | head -1)
+            fi
+            if [ -z "$OVPN_FILE" ]; then
+              # Fallback to US California
+              OVPN_FILE=$(ls "$OVPN_DIR"/*.ovpn 2>/dev/null | grep -i "california\|US.Cal" | head -1)
+            fi
+            if [ -z "$OVPN_FILE" ]; then
+              # Last resort: first available
+              OVPN_FILE=$(ls "$OVPN_DIR"/*.ovpn 2>/dev/null | head -1)
             fi
             
             if [ -z "$OVPN_FILE" ]; then
