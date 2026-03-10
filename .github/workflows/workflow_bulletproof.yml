@@ -54,94 +54,39 @@ jobs:
           python -m camoufox fetch
           echo "✅ All dependencies installed"
 
-      # ─── PIA VPN SETUP ───────────────────────────────────────────
-      - name: Install PIA VPN
+      # ─── OPENVPN SETUP (More reliable than PIA GUI) ──────────────
+      - name: Install OpenVPN
         run: |
-          echo "🌐 Downloading PIA VPN..."
-          PIA_URL="https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pia-linux-3.7-08412.run"
-          PIA_INSTALLER="/tmp/pia-install.run"
-          curl -fSL "$PIA_URL" -o "$PIA_INSTALLER"
-          
-          FILE_SIZE=$(stat -c%s "$PIA_INSTALLER")
-          echo "📥 Downloaded: $(echo "scale=1; $FILE_SIZE / 1048576" | bc) MB"
-          if [ "$FILE_SIZE" -lt 1000000 ]; then
-            echo "❌ Download too small — likely failed"
-            exit 1
-          fi
-          
-          echo "📦 Installing PIA VPN..."
-          chmod +x "$PIA_INSTALLER"
-          sh "$PIA_INSTALLER" || true
-          
-          # Wait for daemon with retry (up to 60s)
-          echo "⏳ Waiting for PIA daemon to start..."
-          for i in $(seq 1 12); do
-            sleep 5
-            if systemctl is-active --quiet piavpn 2>/dev/null; then
-              echo "✅ PIA daemon is running (took ~$((i*5))s)"
-              break
-            fi
-            echo "   ⏳ Attempt $i/12 — daemon not ready yet..."
-          done
-          
-          # Verify daemon is actually running
-          if ! systemctl is-active --quiet piavpn 2>/dev/null; then
-            echo "⚠️ Daemon not running via systemctl, trying manual start..."
-            sudo systemctl start piavpn 2>/dev/null || true
-            sleep 5
-          fi
-          
-          # Find piactl binary
-          PIACTL=""
-          if command -v piactl &>/dev/null; then
-            PIACTL=$(command -v piactl)
-          elif [ -f "/opt/piavpn/bin/piactl" ]; then
-            PIACTL="/opt/piavpn/bin/piactl"
-          elif [ -f "/usr/local/bin/piactl" ]; then
-            PIACTL="/usr/local/bin/piactl"
-          fi
-          
-          if [ -n "$PIACTL" ]; then
-            echo "✅ PIA VPN installed at: $PIACTL"
-            "$PIACTL" --version || true
-          else
-            echo "❌ piactl not found after install"
-            sudo find / -name "piactl" -type f 2>/dev/null || true
-            exit 1
-          fi
+          echo "🌐 Installing OpenVPN..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openvpn unzip curl
+          echo "✅ OpenVPN installed: $(openvpn --version | head -1)"
 
-      - name: Login PIA VPN
+      - name: Download PIA OpenVPN Configs
         run: |
-          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
+          echo "📥 Downloading PIA OpenVPN configuration files..."
           
-          # Wait for daemon to be responsive
-          for i in $(seq 1 6); do
-            if piactl background enable 2>/dev/null; then
-              echo "✅ PIA daemon responsive"
-              break
-            fi
-            echo "   ⏳ Daemon not responsive yet ($i/6)..."
-            sleep 5
-          done
+          # Create config directory
+          sudo mkdir -p /etc/openvpn/pia
+          cd /etc/openvpn/pia
           
-          sleep 2
+          # Download PIA's official OpenVPN configs
+          sudo curl -fSL "https://www.privateinternetaccess.com/openvpn/openvpn.zip" -o pia-configs.zip
+          sudo unzip -o pia-configs.zip
+          sudo rm pia-configs.zip
           
-          # Login
-          CREDS_FILE=$(mktemp)
-          printf 'p8158950\nGoYoula@niba12$2323' > "$CREDS_FILE"
+          # Create auth file with credentials
+          echo "🔐 Setting up authentication..."
+          sudo bash -c 'cat > /etc/openvpn/pia/auth.txt << EOF
+p8158950
+GoYoula@niba12$2323
+EOF'
+          sudo chmod 600 /etc/openvpn/pia/auth.txt
           
-          for attempt in 1 2 3; do
-            if piactl login "$CREDS_FILE" 2>/dev/null; then
-              echo "✅ PIA logged in (attempt $attempt)"
-              rm -f "$CREDS_FILE"
-              break
-            fi
-            echo "   ⚠️ Login attempt $attempt failed, retrying..."
-            sleep 5
-          done
-          rm -f "$CREDS_FILE"
-          
-          echo "✅ PIA ready"
+          # List available configs
+          echo "✅ Available VPN regions:"
+          ls -la /etc/openvpn/pia/*.ovpn | head -10
+          echo "   ... and $(ls /etc/openvpn/pia/*.ovpn | wc -l) total regions"
 
       # ─── DOWNLOAD MAINBOT ────────────────────────────────────────
       - name: Download Mainbot.py from R2
@@ -157,11 +102,10 @@ jobs:
           FGOS_API_KEY: "fgos-scraper-key-2026-secure"
           RUNNER_ROLE: ${{ github.event.inputs.runner_role || 'scraper' }}
           PREFERRED_COUNTRY: ${{ github.event.inputs.preferred_country || '' }}
+          VPN_MODE: "openvpn"
         run: |
-          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
-          
           echo "=========================================="
-          echo "  🚀 BULLETPROOF 6-HOUR SCRAPER"
+          echo "  🚀 BULLETPROOF 6-HOUR SCRAPER (OpenVPN)"
           echo "=========================================="
           echo "  Started at: $(date)"
           echo "  Will run until: $(date -d '+6 hours')"
@@ -173,37 +117,108 @@ jobs:
           CRASH_COUNT=0
           TOTAL_RUNS=0
           LOG_FILE="/tmp/scraper.log"
+          VPN_LOG="/tmp/openvpn.log"
+          OVPN_DIR="/etc/openvpn/pia"
           
-          # ─── VPN CONNECT FUNCTION ───
+          # Available regions (PIA OpenVPN config file names without .ovpn)
+          REGIONS=("us_california" "us_east" "us_west" "us_chicago" "us_texas" "us_florida" "us_atlanta" "uk_london" "de_berlin" "nl_amsterdam" "ca_toronto" "au_sydney")
+          CURRENT_REGION=""
+          
+          # ─── VPN CONNECT FUNCTION (OpenVPN) ───
           connect_vpn() {
-            echo "🌐 [VPN] Connecting..."
+            local region="${1:-}"
             
-            COUNTRY="${PREFERRED_COUNTRY:-us}"
-            piactl set region "$COUNTRY" 2>/dev/null || true
-            piactl connect 2>/dev/null || true
-            
-            # Wait up to 30s for connection
-            for i in $(seq 1 6); do
-              STATUS=$(piactl get connectionstate 2>/dev/null || echo "unknown")
-              if [ "$STATUS" = "Connected" ]; then
-                VPN_IP=$(piactl get vpnip 2>/dev/null || echo "unknown")
-                echo "✅ [VPN] Connected! IP: $VPN_IP"
-                return 0
+            # If no region specified, pick based on preference or random
+            if [ -z "$region" ]; then
+              if [ -n "$PREFERRED_COUNTRY" ]; then
+                # Map country code to PIA config name
+                case "${PREFERRED_COUNTRY,,}" in
+                  us|usa) region="us_california" ;;
+                  uk|gb) region="uk_london" ;;
+                  de) region="de_berlin" ;;
+                  nl) region="nl_amsterdam" ;;
+                  ca) region="ca_toronto" ;;
+                  au) region="au_sydney" ;;
+                  *) region="us_california" ;;
+                esac
+              else
+                # Random region
+                region="${REGIONS[$((RANDOM % ${#REGIONS[@]}))]}"
               fi
-              sleep 5
+            fi
+            
+            CURRENT_REGION="$region"
+            echo "🌐 [VPN] Connecting to: $region"
+            
+            # Kill any existing OpenVPN
+            sudo killall openvpn 2>/dev/null || true
+            sleep 2
+            
+            # Find the config file (try with and without spaces/underscores)
+            OVPN_FILE=""
+            for pattern in "$region" "${region//_/ }" "${region// /_}"; do
+              for f in "$OVPN_DIR"/*"$pattern"*.ovpn "$OVPN_DIR"/"$pattern".ovpn; do
+                if [ -f "$f" ]; then
+                  OVPN_FILE="$f"
+                  break 2
+                fi
+              done
             done
             
-            echo "⚠️ [VPN] Connection timeout — continuing anyway"
+            if [ -z "$OVPN_FILE" ]; then
+              echo "⚠️ [VPN] Config not found for $region, trying US California..."
+              OVPN_FILE=$(ls "$OVPN_DIR"/*california*.ovpn 2>/dev/null | head -1)
+              if [ -z "$OVPN_FILE" ]; then
+                OVPN_FILE=$(ls "$OVPN_DIR"/*.ovpn 2>/dev/null | head -1)
+              fi
+            fi
+            
+            if [ -z "$OVPN_FILE" ]; then
+              echo "❌ [VPN] No OpenVPN config files found!"
+              return 1
+            fi
+            
+            echo "   📄 Using config: $(basename "$OVPN_FILE")"
+            
+            # Start OpenVPN in background
+            sudo openvpn --config "$OVPN_FILE" \
+              --auth-user-pass "$OVPN_DIR/auth.txt" \
+              --daemon --log "$VPN_LOG" \
+              --connect-retry 3 --connect-timeout 30 \
+              --script-security 2 \
+              --verb 3
+            
+            # Wait for connection (check for tun0 interface)
+            echo "   ⏳ Waiting for VPN connection..."
+            for i in $(seq 1 15); do
+              sleep 2
+              if ip link show tun0 &>/dev/null; then
+                # Get VPN IP
+                VPN_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || curl -s --max-time 5 icanhazip.com 2>/dev/null || echo "unknown")
+                echo "✅ [VPN] Connected! IP: $VPN_IP (region: $region)"
+                return 0
+              fi
+            done
+            
+            echo "❌ [VPN] Connection timeout"
+            echo "   📋 OpenVPN log:"
+            tail -20 "$VPN_LOG" 2>/dev/null || true
             return 1
           }
           
           # ─── CHECK VPN FUNCTION ───
           check_vpn() {
-            STATUS=$(piactl get connectionstate 2>/dev/null || echo "unknown")
-            if [ "$STATUS" != "Connected" ]; then
+            if ! ip link show tun0 &>/dev/null; then
               echo "⚠️ [VPN] Disconnected! Reconnecting..."
-              connect_vpn
+              connect_vpn "$CURRENT_REGION"
             fi
+          }
+          
+          # ─── DISCONNECT VPN ───
+          disconnect_vpn() {
+            echo "🔌 [VPN] Disconnecting..."
+            sudo killall openvpn 2>/dev/null || true
+            sleep 2
           }
           
           # ─── Initial VPN connect ───
@@ -294,14 +309,11 @@ jobs:
               
               # Rotate VPN on crash (might help avoid blocks)
               echo "🔄 Rotating VPN region..."
-              piactl disconnect 2>/dev/null || true
-              sleep 5
+              disconnect_vpn
               
               # Pick different region if crashed
-              REGIONS=("us" "uk" "de" "nl" "ca" "au")
-              RANDOM_REGION=${REGIONS[$((RANDOM % ${#REGIONS[@]}))]}
-              PREFERRED_COUNTRY="$RANDOM_REGION"
-              connect_vpn
+              NEW_REGION="${REGIONS[$((RANDOM % ${#REGIONS[@]}))]}"
+              connect_vpn "$NEW_REGION"
               
               # Wait before restart
               sleep 60
