@@ -1,4 +1,4 @@
-name: Fiverr Scraper (Direct + PIA VPN)
+name: Fiverr Scraper (Direct + NordVPN Token)
 
 on:
   workflow_dispatch:
@@ -54,95 +54,45 @@ jobs:
           python -m camoufox fetch
           echo "✅ All dependencies installed"
 
-      # ─── PIA VPN SETUP ───────────────────────────────────────────
-      - name: Install PIA VPN
+      # ─── NORDVPN VPN SETUP ──────────────────────────────────────
+      - name: Install NordVPN
         run: |
-          echo "🌐 Downloading PIA VPN..."
-          PIA_URL="https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/pia-linux-3.7-08412.run"
-          PIA_INSTALLER="/tmp/pia-install.run"
-          curl -fSL "$PIA_URL" -o "$PIA_INSTALLER"
+          echo "🌐 Installing NordVPN..."
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nordvpn
           
-          FILE_SIZE=$(stat -c%s "$PIA_INSTALLER")
-          echo "📥 Downloaded: $(echo "scale=1; $FILE_SIZE / 1048576" | bc) MB"
-          if [ "$FILE_SIZE" -lt 1000000 ]; then
-            echo "❌ Download too small — likely failed"
-            exit 1
-          fi
+          echo "✅ NordVPN installed"
+          nordvpn --version || true
           
-          echo "📦 Installing PIA VPN..."
-          chmod +x "$PIA_INSTALLER"
-          sh "$PIA_INSTALLER" || true
-          
-          # ── Wait for daemon with retry (up to 60s) ──
-          echo "⏳ Waiting for PIA daemon to start..."
-          for i in $(seq 1 12); do
-            sleep 5
-            if systemctl is-active --quiet piavpn 2>/dev/null; then
-              echo "✅ PIA daemon is running (took ~$((i*5))s)"
+          # Wait for daemon to start
+          echo "⏳ Waiting for NordVPN daemon..."
+          for i in $(seq 1 10); do
+            sleep 2
+            if sudo systemctl is-active --quiet nordvpn 2>/dev/null; then
+              echo "✅ NordVPN daemon is running"
               break
             fi
-            echo "   ⏳ Attempt $i/12 — daemon not ready yet..."
+            echo "   ⏳ Attempt $i/10..."
           done
-          
-          # Verify daemon is actually running
-          if ! systemctl is-active --quiet piavpn 2>/dev/null; then
-            echo "⚠️ Daemon not running via systemctl, trying manual start..."
-            sudo systemctl start piavpn 2>/dev/null || true
-            sleep 5
-          fi
-          
-          # Find piactl binary
-          PIACTL=""
-          if command -v piactl &>/dev/null; then
-            PIACTL=$(command -v piactl)
-          elif [ -f "/opt/piavpn/bin/piactl" ]; then
-            PIACTL="/opt/piavpn/bin/piactl"
-          elif [ -f "/usr/local/bin/piactl" ]; then
-            PIACTL="/usr/local/bin/piactl"
-          fi
-          
-          if [ -n "$PIACTL" ]; then
-            echo "✅ PIA VPN installed at: $PIACTL"
-            "$PIACTL" --version || true
-          else
-            echo "❌ piactl not found after install"
-            sudo find / -name "piactl" -type f 2>/dev/null || true
-            exit 1
-          fi
 
-      - name: Login PIA VPN
+      - name: Login NordVPN
         run: |
-          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
-          
-          # Wait for daemon to be responsive (retry up to 30s)
-          for i in $(seq 1 6); do
-            if piactl background enable 2>/dev/null; then
-              echo "✅ PIA daemon responsive"
-              break
-            fi
-            echo "   ⏳ Daemon not responsive yet ($i/6)..."
-            sleep 5
-          done
-          
-          sleep 2
-          
-          # Login
-          CREDS_FILE=$(mktemp)
-          printf 'p8158950\nGoYoula@niba12$2323' > "$CREDS_FILE"
+          echo "🔐 Logging into NordVPN with token..."
           
           # Retry login up to 3 times
           for attempt in 1 2 3; do
-            if piactl login "$CREDS_FILE" 2>/dev/null; then
-              echo "✅ PIA logged in (attempt $attempt)"
-              rm -f "$CREDS_FILE"
+            if nordvpn login --token "e9f2abf0e76371b2b0b9f258ba6cab4ef06267863cbe3f992f4bffd1d20da729" 2>/dev/null; then
+              echo "✅ NordVPN logged in (attempt $attempt)"
               break
             fi
             echo "   ⚠️ Login attempt $attempt failed, retrying..."
             sleep 5
           done
-          rm -f "$CREDS_FILE"
           
-          echo "✅ PIA ready. VPN connect handled by Mainbot.py"
+          # Enable autoconnect for reliability
+          sudo nordvpn set autoconnect on 2>/dev/null || true
+          
+          echo "✅ NordVPN ready. VPN connect handled by Mainbot.py"
 
       # ─── RUN THE SCRAPER ─────────────────────────────────────────
       - name: Download Mainbot.py from R2
@@ -152,14 +102,11 @@ jobs:
 
       - name: Run Scraper (background + watchdog)
         env:
-          PIA_USERNAME: "p8158950"
-          PIA_PASSWORD: "GoYoula@niba12$2323"
+          NORDVPN_TOKEN: "e9f2abf0e76371b2b0b9f258ba6cab4ef06267863cbe3f992f4bffd1d20da729"
           FGOS_API_KEY: "fgos-scraper-key-2026-secure"
           RUNNER_ROLE: ${{ github.event.inputs.runner_role || 'scraper' }}
           PREFERRED_COUNTRY: ${{ github.event.inputs.preferred_country || '' }}
         run: |
-          export PATH="/opt/piavpn/bin:/usr/local/bin:$PATH"
-          
           echo "=========================================="
           echo "  🚀 Starting Fiverr Scraper (Background)"
           echo "=========================================="
