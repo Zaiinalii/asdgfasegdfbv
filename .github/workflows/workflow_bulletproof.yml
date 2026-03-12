@@ -1,197 +1,174 @@
 name: Fiverr Scraper (NordVPN OpenVPN Debug)
 
 on:
-workflow_dispatch:
-inputs:
-runner_role:
-description: 'Runner role'
-required: false
-default: 'scraper'
-preferred_country:
-description: 'Preferred VPN country'
-required: false
-default: ''
+  workflow_dispatch:
+    inputs:
+      runner_role:
+        description: 'Runner role'
+        required: false
+        default: 'scraper'
+      preferred_country:
+        description: 'Preferred VPN country'
+        required: false
+        default: ''
 
 jobs:
-scrape:
-runs-on: ubuntu-latest
-timeout-minutes: 360
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
 
-```
-env:
-  DISPLAY: ":99"
+    env:
+      DISPLAY: ":99"
 
-steps:
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-  - name: Checkout Repository
-    uses: actions/checkout@v4
+      # ───────── DISPLAY ─────────
+      - name: Start Virtual Display
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb xauth x11-utils
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          echo "Display started"
 
-  # ───────────────── DISPLAY ─────────────────
-  - name: Start Virtual Display
-    run: |
-      sudo apt-get update -qq
-      sudo apt-get install -y xvfb xauth x11-utils
-      Xvfb :99 -screen 0 1920x1080x24 &
-      sleep 2
-      echo "Display started"
+      # ───────── PYTHON ─────────
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-  # ───────────────── PYTHON ─────────────────
-  - name: Setup Python
-    uses: actions/setup-python@v5
-    with:
-      python-version: "3.11"
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install playwright requests certifi "camoufox[geoip]" browserforge
+          python -m playwright install firefox
+          python -m playwright install-deps firefox
+          python -m camoufox fetch
 
-  - name: Install Dependencies
-    run: |
-      pip install --upgrade pip
-      pip install playwright requests certifi "camoufox[geoip]" browserforge
-      python -m playwright install firefox
-      python -m playwright install-deps firefox
-      python -m camoufox fetch
+      # ───────── VPN INSTALL ─────────
+      - name: Install OpenVPN
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openvpn jq
+          openvpn --version | head -1
 
-  # ───────────────── VPN INSTALL ─────────────────
-  - name: Install OpenVPN
-    run: |
-      sudo apt-get update
-      sudo apt-get install -y openvpn jq
-      openvpn --version | head -1
+      # ───────── DOWNLOAD CONFIG ─────────
+      - name: Download NordVPN Config
+        run: |
+          COUNTRY="${{ github.event.inputs.preferred_country }}"
+          if [ -z "$COUNTRY" ]; then
+            COUNTRY="us"
+          fi
 
-  # ───────────────── DOWNLOAD CONFIG ─────────────────
-  - name: Download NordVPN Config
-    run: |
+          declare -A SERVERS
+          SERVERS[us]="us7783"
+          SERVERS[uk]="uk1009"
+          SERVERS[ca]="ca173"
+          SERVERS[de]="de206"
 
-      COUNTRY="${{ github.event.inputs.preferred_country }}"
-      if [ -z "$COUNTRY" ]; then
-        COUNTRY="us"
-      fi
+          SERVER="${SERVERS[$COUNTRY]:-us7783}"
 
-      declare -A SERVERS
-      SERVERS[us]="us7783"
-      SERVERS[uk]="uk1009"
-      SERVERS[ca]="ca173"
-      SERVERS[de]="de206"
+          URL="https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/${SERVER}.nordvpn.com.udp.ovpn"
 
-      SERVER="${SERVERS[$COUNTRY]:-us7783}"
+          echo "Downloading config: $URL"
+          curl -fSL "$URL" -o server.ovpn
 
-      URL="https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/${SERVER}.nordvpn.com.udp.ovpn"
+          echo "Config preview:"
+          head server.ovpn
 
-      echo "Downloading config: $URL"
+      # ───────── AUTH FILE ─────────
+      - name: Create VPN Auth File
+        run: |
+          echo "iUbZfFG7fUys9REFmQpqo3Vm" > auth.txt
+          echo "suen4AmAMuu3HAKjD9RDpdqp" >> auth.txt
+          chmod 600 auth.txt
+          echo "Auth file created"
 
-      curl -fSL "$URL" -o server.ovpn
+      # ───────── START VPN ─────────
+      - name: Start OpenVPN
+        run: |
+          sudo modprobe tun || true
 
-      echo "Config preview:"
-      head server.ovpn
+          sudo openvpn \
+            --config server.ovpn \
+            --auth-user-pass auth.txt \
+            --auth-nocache \
+            --route-nopull \
+            --daemon \
+            --log /tmp/openvpn.log
 
-  # ───────────────── AUTH FILE ─────────────────
-  - name: Create VPN Auth File
-    run: |
+          echo "Waiting for VPN connection..."
 
-      echo "Creating credentials file"
+          for i in {1..30}; do
+            if grep -q "Initialization Sequence Completed" /tmp/openvpn.log; then
+              echo "VPN CONNECTED"
+              break
+            fi
 
-      echo "iUbZfFG7fUys9REFmQpqo3Vm" > auth.txt
-      echo "suen4AmAMuu3HAKjD9RDpdqp" >> auth.txt
+            if grep -q "AUTH_FAILED" /tmp/openvpn.log; then
+              echo "VPN AUTH FAILED"
+              cat /tmp/openvpn.log
+              exit 1
+            fi
 
-      chmod 600 auth.txt
+            echo "Waiting $i"
+            sleep 2
+          done
 
-      cat auth.txt | sed 's/./*/g'
+          echo "VPN LOG:"
+          sudo cat /tmp/openvpn.log || true
 
-  # ───────────────── START VPN ─────────────────
-  - name: Start OpenVPN
-    run: |
+      # ───────── NETWORK DEBUG ─────────
+      - name: Network Diagnostics
+        run: |
+          echo "Interfaces:"
+          ip a
 
-      echo "Loading tun module"
-      sudo modprobe tun || true
+          echo "Routes:"
+          ip route
 
-      echo "Starting OpenVPN"
+          echo "Public IP:"
+          curl -s http://ip-api.com/json | jq .
 
-      sudo openvpn \
-        --config server.ovpn \
-        --auth-user-pass auth.txt \
-        --auth-nocache \
-        --route-nopull \
-        --daemon \
-        --log /tmp/openvpn.log
+      # ───────── DOWNLOAD BOT ─────────
+      - name: Download Mainbot.py
+        run: |
+          curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot.py -o Mainbot.py
+          ls -lh Mainbot.py
 
-      echo "Waiting for VPN..."
+      # ───────── RUN SCRAPER ─────────
+      - name: Run Scraper
+        run: |
+          touch /tmp/scraper.log
 
-      for i in {1..30}; do
+          python Mainbot.py > /tmp/scraper.log 2>&1 &
+          BOT_PID=$!
 
-        if grep -q "Initialization Sequence Completed" /tmp/openvpn.log; then
-          echo "VPN CONNECTED"
-          break
-        fi
+          echo "Bot PID $BOT_PID"
 
-        if grep -q "AUTH_FAILED" /tmp/openvpn.log; then
-          echo "VPN AUTH FAILED"
-          cat /tmp/openvpn.log
-          exit 1
-        fi
+          MINUTES=0
 
-        echo "waiting $i"
-        sleep 2
-      done
+          while kill -0 "$BOT_PID" 2>/dev/null; do
+            sleep 300
+            MINUTES=$((MINUTES+5))
+            echo "Heartbeat $MINUTES minutes"
+            tail -3 /tmp/scraper.log || true
+          done
 
-      echo "VPN LOG:"
-      sudo cat /tmp/openvpn.log || true
+          wait "$BOT_PID"
+          EXIT_CODE=$?
 
-  # ───────────────── VERIFY NETWORK ─────────────────
-  - name: Network Diagnostics
-    run: |
+          echo "Bot finished"
+          tail -50 /tmp/scraper.log
 
-      echo "Interfaces:"
-      ip a
+          exit $EXIT_CODE
 
-      echo "Routes:"
-      ip route
-
-      echo "Public IP:"
-      curl -s http://ip-api.com/json | jq .
-
-  # ───────────────── DOWNLOAD BOT ─────────────────
-  - name: Download Mainbot.py
-    run: |
-      curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot.py -o Mainbot.py
-      ls -lh Mainbot.py
-
-  # ───────────────── RUN SCRAPER ─────────────────
-  - name: Run Scraper
-    run: |
-
-      touch /tmp/scraper.log
-
-      python Mainbot.py > /tmp/scraper.log 2>&1 &
-      BOT_PID=$!
-
-      echo "Bot PID $BOT_PID"
-
-      MINUTES=0
-
-      while kill -0 "$BOT_PID" 2>/dev/null; do
-
-        sleep 300
-
-        MINUTES=$((MINUTES+5))
-
-        echo "Heartbeat $MINUTES minutes"
-
-        tail -3 /tmp/scraper.log || true
-
-      done
-
-      wait "$BOT_PID"
-      EXIT_CODE=$?
-
-      echo "Bot finished"
-
-      tail -50 /tmp/scraper.log
-
-      exit $EXIT_CODE
-
-  # ───────────────── LOG UPLOAD ─────────────────
-  - name: Upload Logs
-    if: always()
-    uses: actions/upload-artifact@v4
-    with:
-      name: scraper-log-${{ github.run_id }}
-      path: /tmp/scraper.log
-```
+      # ───────── LOG UPLOAD ─────────
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scraper-log-${{ github.run_id }}
+          path: /tmp/scraper.log
