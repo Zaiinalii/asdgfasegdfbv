@@ -1,4 +1,4 @@
-name: Fiverr Scraper (Direct + NordVPN Token)
+name: Fiverr Scraper (NordVPN OpenVPN)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max
+    timeout-minutes: 360
 
     env:
       DISPLAY: ":99"
@@ -32,16 +32,14 @@ jobs:
       # ─── VIRTUAL DISPLAY ─────────────────────────────────────────
       - name: Start Virtual Display
         run: |
-          echo "🖥️ Installing Xvfb (minimal fonts)..."
           sudo apt-get update -qq
-          # Install only essential Xvfb packages, skip unnecessary fonts
           sudo apt-get install -y -qq --no-install-recommends xvfb xauth x11-utils
           Xvfb :99 -screen 0 1920x1080x24 &
           sleep 2
-          echo "✅ Virtual display running on :99"
+          echo "✅ Virtual display running"
 
       # ─── PYTHON SETUP ────────────────────────────────────────────
-      - name: Setup Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -53,27 +51,21 @@ jobs:
           python -m playwright install firefox
           python -m playwright install-deps firefox
           python -m camoufox fetch
-          echo "✅ All dependencies installed"
 
-      # ─── OPENVPN VPN SETUP ─────────────────────────────────────
+      # ─── OPENVPN SETUP ───────────────────────────────────────────
       - name: Install OpenVPN
         run: |
-          echo "🌐 Installing OpenVPN..."
           sudo apt-get update -qq
           sudo apt-get install -y -qq openvpn jq
-          echo "✅ OpenVPN installed"
           openvpn --version | head -1
 
-      - name: Download NordVPN OpenVPN Config
+      - name: Download NordVPN Config
         run: |
           COUNTRY="${{ github.event.inputs.preferred_country }}"
           if [ -z "$COUNTRY" ]; then
             COUNTRY="us"
           fi
-          
-          echo "🌐 Preferred country: $COUNTRY"
-          
-          # Map country to NordVPN server (update codes if servers change)
+
           declare -A SERVER_MAP
           SERVER_MAP[us]="us9365"
           SERVER_MAP[uk]="uk1009"
@@ -84,202 +76,103 @@ jobs:
           SERVER_MAP[au]="au183"
           SERVER_MAP[ca]="ca173"
           SERVER_MAP[in]="in58"
-          SERVER_MAP[br]="br186"
-          
-          SERVER="${SERVER_MAP[$COUNTRY]:-us9365}"
-          CONFIG_URL="https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/${SERVER}.nordvpn.com.udp.ovpn"
-          
-          echo "📥 Downloading OpenVPN config from: $CONFIG_URL"
-          if curl -fSL "$CONFIG_URL" -o server.ovpn; then
-            echo "✅ OpenVPN config downloaded"
-            head -5 server.ovpn
-          else
-            echo "⚠️  Primary server failed, trying fallback..."
-            curl -fSL "https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/us9365.nordvpn.com.udp.ovpn" -o server.ovpn
-            if [ -s server.ovpn ]; then
-              echo "✅ Fallback config downloaded"
-            else
-              echo "❌ Failed to download OpenVPN config"
-              exit 1
-            fi
-          fi
 
+          SERVER="${SERVER_MAP[$COUNTRY]:-us9365}"
+
+          CONFIG_URL="https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/${SERVER}.nordvpn.com.udp.ovpn"
+
+          echo "Downloading $CONFIG_URL"
+          curl -fSL "$CONFIG_URL" -o server.ovpn
+
+      # ─── CREATE AUTH FILE ────────────────────────────────────────
       - name: Create NordVPN Auth File
         run: |
-          echo "🔐 Creating authentication file..."
-          echo "nadeemdepal27@gmail.com" > auth.txt
-          echo "Zain.rty123" >> auth.txt
+          echo "iUbZfFG7fUys9REFmQpqo3Vm" > auth.txt
+          echo "suen4AmAMuu3HAKjD9RDpdqp" >> auth.txt
           chmod 600 auth.txt
-          echo "✅ Auth file created (600 permissions)"
+          echo "Auth file created"
 
-      - name: Connect to NordVPN via OpenVPN
+      # ─── CONNECT VPN ─────────────────────────────────────────────
+      - name: Connect to NordVPN
         run: |
-          echo "🔐 Starting OpenVPN daemon..."
-          
-          # Create writable log directory and file
-          mkdir -p /tmp/openvpn_logs
-          touch /tmp/openvpn_logs/openvpn.log
-          chmod 666 /tmp/openvpn_logs/openvpn.log
-          
-          # Start OpenVPN with log file
-          sudo openvpn --config server.ovpn --auth-user-pass auth.txt --daemon --log /tmp/openvpn_logs/openvpn.log
-          
-          echo "⏳ Waiting for OpenVPN to establish connection (15 seconds)..."
+          sudo openvpn \
+            --config server.ovpn \
+            --auth-user-pass auth.txt \
+            --auth-nocache \
+            --daemon \
+            --log /tmp/openvpn.log
+
+          echo "Waiting for VPN connection..."
           sleep 15
-          
-          # Check OpenVPN log for errors (use sudo if needed)
-          echo "📋 OpenVPN log output:"
-          if [ -f /tmp/openvpn_logs/openvpn.log ]; then
-            sudo cat /tmp/openvpn_logs/openvpn.log 2>/dev/null || cat /tmp/openvpn_logs/openvpn.log 2>/dev/null || echo "⚠️ Could not read log file"
-          else
-            echo "⚠️ OpenVPN log file not created"
+
+          echo "OpenVPN log:"
+          sudo cat /tmp/openvpn.log || true
+
+          if grep -q "AUTH_FAILED" /tmp/openvpn.log; then
+            echo "❌ NordVPN authentication failed"
+            exit 1
           fi
-          
-          echo ""
-          echo "📋 Verifying VPN connection..."
-          for i in {1..5}; do
-            IP_INFO=$(curl -s --max-time 5 http://ip-api.com/json)
-            if echo "$IP_INFO" | jq . >/dev/null 2>&1; then
-              COUNTRY=$(echo "$IP_INFO" | jq -r '.country // "Unknown"')
-              ISP=$(echo "$IP_INFO" | jq -r '.isp // "Unknown"')
-              IP=$(echo "$IP_INFO" | jq -r '.query // "Unknown"')
-              
-              echo "✅ IP Check Result:"
-              echo "   IP: $IP"
-              echo "   Country: $COUNTRY"  
-              echo "   ISP: $ISP"
-              echo ""
-              
-              # Check if we got a NordVPN IP (ISP should contain "NordVPN" or we should NOT be on Azure)
-              if echo "$ISP" | grep -qiE "nordvpn|nord vpn"; then
-                echo "✅ VPN CONNECTION CONFIRMED - Using NordVPN IP"
-              elif echo "$ISP" | grep -qiE "microsoft|azure"; then
-                echo "❌ ERROR: Still on native IP (Microsoft Azure) - OpenVPN failed to connect!"
-                echo "   Check NordVPN credentials in workflow"
-              fi
-              break
-            fi
-            if [ $i -lt 5 ]; then
-              echo "   ⏳ Retry $i/5..."
-              sleep 2
-            else
-              echo "⚠️  Warning: Could not verify IP after 5 retries"
-            fi
-          done
 
-      # ─── FINAL VERIFICATION ────────────────────────────────────
-      - name: Final VPN Status Check
+          if ! grep -q "Initialization Sequence Completed" /tmp/openvpn.log; then
+            echo "❌ VPN did not finish connecting"
+            exit 1
+          fi
+
+      # ─── VERIFY VPN IP ───────────────────────────────────────────
+      - name: Verify VPN Connection
         run: |
-          echo "📡 Checking OpenVPN daemon status..."
-          ps aux | grep -i openvpn | grep -v grep || echo "⚠️  OpenVPN process not found in ps (may still be running)"
-          
-          echo ""
-          echo "🌐 Final IP check:"
-          curl -s http://ip-api.com/json/ | jq . || echo "(IP check failed - continuing)"
-          
-          echo ""
-          echo "✅ VPN setup complete. Mainbot.py will handle country switching."
+          echo "Checking IP..."
 
-      # ─── RUN THE SCRAPER ─────────────────────────────────────────
-      - name: Download Mainbot.py from R2
+          IP_INFO=$(curl -s http://ip-api.com/json)
+          echo "$IP_INFO" | jq .
+
+          ISP=$(echo "$IP_INFO" | jq -r '.isp')
+
+          if echo "$ISP" | grep -qi "nordvpn"; then
+            echo "✅ NordVPN connection confirmed"
+          else
+            echo "❌ VPN not active — stopping scraper"
+            exit 1
+          fi
+
+      # ─── DOWNLOAD BOT ────────────────────────────────────────────
+      - name: Download Mainbot.py
         run: |
           curl -fSL "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot.py" -o Mainbot.py
-          
-          if [ ! -f Mainbot.py ]; then
-            echo "❌ Failed to download Mainbot.py"
-            exit 1
-          fi
-          
-          FILE_SIZE=$(stat -c%s Mainbot.py 2>/dev/null || stat -f%z Mainbot.py 2>/dev/null)
-          if [ "$FILE_SIZE" -lt 10000 ]; then
-            echo "❌ Downloaded file too small ($FILE_SIZE bytes) - likely failed"
-            head -20 Mainbot.py
-            exit 1
-          fi
-          
-          echo "✅ Downloaded Mainbot.py ($FILE_SIZE bytes)"
           ls -lah Mainbot.py
 
-      - name: Run Scraper (background + watchdog)
+      # ─── RUN SCRAPER ─────────────────────────────────────────────
+      - name: Run Scraper
         env:
-          NORDVPN_TOKEN: "e9f2abf0e76371b2b0b9f258ba6cab4ef06267863cbe3f992f4bffd1d20da729"
           FGOS_API_KEY: "fgos-scraper-key-2026-secure"
           RUNNER_ROLE: ${{ github.event.inputs.runner_role || 'scraper' }}
           PREFERRED_COUNTRY: ${{ github.event.inputs.preferred_country || '' }}
         run: |
-          echo "=========================================="
-          echo "  🚀 Starting Fiverr Scraper (Background)"
-          echo "=========================================="
-          echo ""
-          echo "📋 Python version:"
-          python --version
-          echo ""
-          echo "📋 Mainbot.py info:"
-          ls -lah Mainbot.py
-          echo ""
-          
-          # Create log file early so it exists even if script fails immediately
           touch /tmp/scraper.log
-          
-          # ── Launch Mainbot.py in background, log to file ──
+
           python Mainbot.py > /tmp/scraper.log 2>&1 &
           BOT_PID=$!
-          echo "✅ Mainbot.py started (PID: $BOT_PID)"
-          echo "   Logs → /tmp/scraper.log"
-          echo ""
-          
-          # ── Watchdog: keep runner alive while bot runs ──
-          # Prints a heartbeat every 5 min so GitHub doesn't kill for inactivity
-          # Exits when Mainbot.py finishes (success or crash)
+
+          echo "Mainbot PID: $BOT_PID"
+
           MINUTES=0
+
           while kill -0 "$BOT_PID" 2>/dev/null; do
             sleep 300
             MINUTES=$((MINUTES + 5))
-            
-            # Print heartbeat (prevents GitHub 10-min no-output timeout)
-            echo "💓 [$MINUTES min] Scraper still running (PID $BOT_PID)"
-            
-            # Show last 3 lines of log for quick status
-            echo "   📄 Recent logs:"
-            tail -3 /tmp/scraper.log 2>/dev/null || echo "   (no logs yet)"
-            echo ""
+            echo "💓 [$MINUTES min] Scraper still running"
+            tail -3 /tmp/scraper.log || true
           done
-          
-          # ── Bot finished — get exit code ──
+
           wait "$BOT_PID"
           EXIT_CODE=$?
-          
-          echo ""
-          echo "=========================================="
-          echo "  🏁 Scraper finished (exit code: $EXIT_CODE)"
-          echo "=========================================="
-          echo ""
-          
-          # Show log if it exists
-          if [ -f /tmp/scraper.log ]; then
-            echo "📋 Last 100 lines of log:"
-            tail -100 /tmp/scraper.log
-          else
-            echo "❌ No log file found at /tmp/scraper.log"
-          fi
-          
+
+          echo "Scraper finished with code $EXIT_CODE"
+          tail -50 /tmp/scraper.log || true
+
           exit $EXIT_CODE
 
-      # ─── UPLOAD LOG AS ARTIFACT (always, even on failure) ────────
-      - name: Check log file before upload
-        if: always()
-        run: |
-          echo "📋 Checking log file..."
-          if [ -f /tmp/scraper.log ]; then
-            echo "✅ Log file exists"
-            ls -lah /tmp/scraper.log
-            echo "📊 File size: $(stat -c%s /tmp/scraper.log 2>/dev/null || stat -f%z /tmp/scraper.log) bytes"
-          else
-            echo "❌ Log file not found - creating empty one"
-            mkdir -p /tmp
-            echo "No log file was created by the scraper" > /tmp/scraper.log
-          fi
-
+      # ─── UPLOAD LOG ──────────────────────────────────────────────
       - name: Upload scraper log
         if: always()
         uses: actions/upload-artifact@v4
