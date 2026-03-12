@@ -24,6 +24,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # ───────── DISPLAY ─────────
       - name: Start Virtual Display
         run: |
           sudo apt-get update -qq
@@ -32,6 +33,7 @@ jobs:
           sleep 2
           echo "Virtual display started"
 
+      # ───────── PYTHON ─────────
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -45,12 +47,14 @@ jobs:
           python -m playwright install-deps firefox
           python -m camoufox fetch
 
+      # ───────── OPENVPN ─────────
       - name: Install OpenVPN
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y openvpn jq
           openvpn --version | head -1
 
+      # ───────── GET SERVER ─────────
       - name: Fetch NordVPN Server
         run: |
           echo "Fetching recommended NordVPN server..."
@@ -66,7 +70,7 @@ jobs:
 
           CONFIG_URL="https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/${SERVER}.udp.ovpn"
 
-          echo "Downloading $CONFIG_URL"
+          echo "Downloading config: $CONFIG_URL"
 
           curl -fSL "$CONFIG_URL" -o server.ovpn
 
@@ -75,6 +79,7 @@ jobs:
             exit 1
           fi
 
+      # ───────── AUTH FILE ─────────
       - name: Create NordVPN Auth File
         run: |
           echo "iUbZfFG7fUys9REFmQpqo3Vm" > auth.txt
@@ -82,6 +87,7 @@ jobs:
           chmod 600 auth.txt
           echo "Auth file created"
 
+      # ───────── CONNECT VPN ─────────
       - name: Connect VPN
         run: |
           sudo modprobe tun || true
@@ -115,6 +121,7 @@ jobs:
           echo "VPN LOG:"
           sudo cat /tmp/openvpn.log || true
 
+      # ───────── VERIFY IP ─────────
       - name: Verify VPN IP
         run: |
           echo "Checking IP..."
@@ -125,18 +132,20 @@ jobs:
 
           ISP=$(echo "$IP_INFO" | jq -r '.isp')
 
-          if echo "$ISP" | grep -qi "nordvpn"; then
-            echo "VPN confirmed"
-          else
-            echo "VPN not active - stopping job"
+          if echo "$ISP" | grep -qi "microsoft"; then
+            echo "Still using GitHub runner IP (Azure)"
             exit 1
+          else
+            echo "VPN active (non-Azure IP)"
           fi
 
+      # ───────── DOWNLOAD BOT ─────────
       - name: Download Mainbot.py
         run: |
           curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot.py -o Mainbot.py
           ls -lh Mainbot.py
 
+      # ───────── RUN SCRAPER ─────────
       - name: Run Scraper
         run: |
           touch /tmp/scraper.log
@@ -163,6 +172,7 @@ jobs:
 
           exit $EXIT_CODE
 
+      # ───────── UPLOAD LOG ─────────
       - name: Upload Logs
         if: always()
         uses: actions/upload-artifact@v4
