@@ -51,9 +51,10 @@ jobs:
           sudo apt-get install -y openvpn jq
           openvpn --version | head -1
 
-      - name: Get NordVPN Server
+      - name: Fetch NordVPN Server
         run: |
           echo "Fetching recommended NordVPN server..."
+
           SERVER=$(curl -s https://api.nordvpn.com/v1/servers/recommendations | jq -r '.[0].hostname')
 
           if [ -z "$SERVER" ]; then
@@ -65,7 +66,7 @@ jobs:
 
           CONFIG_URL="https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/${SERVER}.udp.ovpn"
 
-          echo "Downloading config: $CONFIG_URL"
+          echo "Downloading $CONFIG_URL"
 
           curl -fSL "$CONFIG_URL" -o server.ovpn
 
@@ -95,14 +96,15 @@ jobs:
           echo "Waiting for VPN..."
 
           for i in $(seq 1 30); do
-            if grep -q "Initialization Sequence Completed" /tmp/openvpn.log; then
+
+            if sudo grep -q "Initialization Sequence Completed" /tmp/openvpn.log; then
               echo "VPN CONNECTED"
               break
             fi
 
-            if grep -q "AUTH_FAILED" /tmp/openvpn.log; then
+            if sudo grep -q "AUTH_FAILED" /tmp/openvpn.log; then
               echo "VPN AUTH FAILED"
-              cat /tmp/openvpn.log
+              sudo cat /tmp/openvpn.log
               exit 1
             fi
 
@@ -110,13 +112,15 @@ jobs:
             sleep 2
           done
 
-          echo "OpenVPN Log:"
+          echo "VPN LOG:"
           sudo cat /tmp/openvpn.log || true
 
       - name: Verify VPN IP
         run: |
           echo "Checking IP..."
+
           IP_INFO=$(curl -s http://ip-api.com/json)
+
           echo "$IP_INFO" | jq .
 
           ISP=$(echo "$IP_INFO" | jq -r '.isp')
