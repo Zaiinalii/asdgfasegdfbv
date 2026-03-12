@@ -1,182 +1,197 @@
-name: Fiverr Scraper (NordVPN OpenVPN)
+name: Fiverr Scraper (NordVPN OpenVPN Debug)
 
 on:
-  workflow_dispatch:
-    inputs:
-      runner_role:
-        description: 'Runner role: scraper (Phase 1+2) or detail_only (Phase 2 only)'
-        required: false
-        default: 'scraper'
-        type: choice
-        options:
-          - scraper
-          - detail_only
-      preferred_country:
-        description: 'Preferred country code for VPN (empty = server decides)'
-        required: false
-        default: ''
-        type: string
+workflow_dispatch:
+inputs:
+runner_role:
+description: 'Runner role'
+required: false
+default: 'scraper'
+preferred_country:
+description: 'Preferred VPN country'
+required: false
+default: ''
 
 jobs:
-  scrape:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360
+scrape:
+runs-on: ubuntu-latest
+timeout-minutes: 360
 
-    env:
-      DISPLAY: ":99"
+```
+env:
+  DISPLAY: ":99"
 
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+steps:
 
-      # ─── VIRTUAL DISPLAY ─────────────────────────────────────────
-      - name: Start Virtual Display
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends xvfb xauth x11-utils
-          Xvfb :99 -screen 0 1920x1080x24 &
-          sleep 2
-          echo "✅ Virtual display running"
+  - name: Checkout Repository
+    uses: actions/checkout@v4
 
-      # ─── PYTHON SETUP ────────────────────────────────────────────
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+  # ───────────────── DISPLAY ─────────────────
+  - name: Start Virtual Display
+    run: |
+      sudo apt-get update -qq
+      sudo apt-get install -y xvfb xauth x11-utils
+      Xvfb :99 -screen 0 1920x1080x24 &
+      sleep 2
+      echo "Display started"
 
-      - name: Install Python Dependencies
-        run: |
-          pip install --upgrade pip
-          pip install playwright requests certifi "camoufox[geoip]" browserforge
-          python -m playwright install firefox
-          python -m playwright install-deps firefox
-          python -m camoufox fetch
+  # ───────────────── PYTHON ─────────────────
+  - name: Setup Python
+    uses: actions/setup-python@v5
+    with:
+      python-version: "3.11"
 
-      # ─── OPENVPN SETUP ───────────────────────────────────────────
-      - name: Install OpenVPN
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq openvpn jq
-          openvpn --version | head -1
+  - name: Install Dependencies
+    run: |
+      pip install --upgrade pip
+      pip install playwright requests certifi "camoufox[geoip]" browserforge
+      python -m playwright install firefox
+      python -m playwright install-deps firefox
+      python -m camoufox fetch
 
-      - name: Download NordVPN Config
-        run: |
-          COUNTRY="${{ github.event.inputs.preferred_country }}"
-          if [ -z "$COUNTRY" ]; then
-            COUNTRY="us"
-          fi
+  # ───────────────── VPN INSTALL ─────────────────
+  - name: Install OpenVPN
+    run: |
+      sudo apt-get update
+      sudo apt-get install -y openvpn jq
+      openvpn --version | head -1
 
-          declare -A SERVER_MAP
-          SERVER_MAP[us]="us9365"
-          SERVER_MAP[uk]="uk1009"
-          SERVER_MAP[de]="de206"
-          SERVER_MAP[fr]="fr203"
-          SERVER_MAP[nl]="nl169"
-          SERVER_MAP[sg]="sg91"
-          SERVER_MAP[au]="au183"
-          SERVER_MAP[ca]="ca173"
-          SERVER_MAP[in]="in58"
+  # ───────────────── DOWNLOAD CONFIG ─────────────────
+  - name: Download NordVPN Config
+    run: |
 
-          SERVER="${SERVER_MAP[$COUNTRY]:-us9365}"
+      COUNTRY="${{ github.event.inputs.preferred_country }}"
+      if [ -z "$COUNTRY" ]; then
+        COUNTRY="us"
+      fi
 
-          CONFIG_URL="https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/${SERVER}.nordvpn.com.udp.ovpn"
+      declare -A SERVERS
+      SERVERS[us]="us7783"
+      SERVERS[uk]="uk1009"
+      SERVERS[ca]="ca173"
+      SERVERS[de]="de206"
 
-          echo "Downloading $CONFIG_URL"
-          curl -fSL "$CONFIG_URL" -o server.ovpn
+      SERVER="${SERVERS[$COUNTRY]:-us7783}"
 
-      # ─── CREATE AUTH FILE ────────────────────────────────────────
-      - name: Create NordVPN Auth File
-        run: |
-          echo "iUbZfFG7fUys9REFmQpqo3Vm" > auth.txt
-          echo "suen4AmAMuu3HAKjD9RDpdqp" >> auth.txt
-          chmod 600 auth.txt
-          echo "Auth file created"
+      URL="https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/${SERVER}.nordvpn.com.udp.ovpn"
 
-      # ─── CONNECT VPN ─────────────────────────────────────────────
-      - name: Connect to NordVPN
-        run: |
-          sudo openvpn \
-            --config server.ovpn \
-            --auth-user-pass auth.txt \
-            --auth-nocache \
-            --daemon \
-            --log /tmp/openvpn.log
+      echo "Downloading config: $URL"
 
-          echo "Waiting for VPN connection..."
-          sleep 15
+      curl -fSL "$URL" -o server.ovpn
 
-          echo "OpenVPN log:"
-          sudo cat /tmp/openvpn.log || true
+      echo "Config preview:"
+      head server.ovpn
 
-          if grep -q "AUTH_FAILED" /tmp/openvpn.log; then
-            echo "❌ NordVPN authentication failed"
-            exit 1
-          fi
+  # ───────────────── AUTH FILE ─────────────────
+  - name: Create VPN Auth File
+    run: |
 
-          if ! grep -q "Initialization Sequence Completed" /tmp/openvpn.log; then
-            echo "❌ VPN did not finish connecting"
-            exit 1
-          fi
+      echo "Creating credentials file"
 
-      # ─── VERIFY VPN IP ───────────────────────────────────────────
-      - name: Verify VPN Connection
-        run: |
-          echo "Checking IP..."
+      echo "iUbZfFG7fUys9REFmQpqo3Vm" > auth.txt
+      echo "suen4AmAMuu3HAKjD9RDpdqp" >> auth.txt
 
-          IP_INFO=$(curl -s http://ip-api.com/json)
-          echo "$IP_INFO" | jq .
+      chmod 600 auth.txt
 
-          ISP=$(echo "$IP_INFO" | jq -r '.isp')
+      cat auth.txt | sed 's/./*/g'
 
-          if echo "$ISP" | grep -qi "nordvpn"; then
-            echo "✅ NordVPN connection confirmed"
-          else
-            echo "❌ VPN not active — stopping scraper"
-            exit 1
-          fi
+  # ───────────────── START VPN ─────────────────
+  - name: Start OpenVPN
+    run: |
 
-      # ─── DOWNLOAD BOT ────────────────────────────────────────────
-      - name: Download Mainbot.py
-        run: |
-          curl -fSL "https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot.py" -o Mainbot.py
-          ls -lah Mainbot.py
+      echo "Loading tun module"
+      sudo modprobe tun || true
 
-      # ─── RUN SCRAPER ─────────────────────────────────────────────
-      - name: Run Scraper
-        env:
-          FGOS_API_KEY: "fgos-scraper-key-2026-secure"
-          RUNNER_ROLE: ${{ github.event.inputs.runner_role || 'scraper' }}
-          PREFERRED_COUNTRY: ${{ github.event.inputs.preferred_country || '' }}
-        run: |
-          touch /tmp/scraper.log
+      echo "Starting OpenVPN"
 
-          python Mainbot.py > /tmp/scraper.log 2>&1 &
-          BOT_PID=$!
+      sudo openvpn \
+        --config server.ovpn \
+        --auth-user-pass auth.txt \
+        --auth-nocache \
+        --route-nopull \
+        --daemon \
+        --log /tmp/openvpn.log
 
-          echo "Mainbot PID: $BOT_PID"
+      echo "Waiting for VPN..."
 
-          MINUTES=0
+      for i in {1..30}; do
 
-          while kill -0 "$BOT_PID" 2>/dev/null; do
-            sleep 300
-            MINUTES=$((MINUTES + 5))
-            echo "💓 [$MINUTES min] Scraper still running"
-            tail -3 /tmp/scraper.log || true
-          done
+        if grep -q "Initialization Sequence Completed" /tmp/openvpn.log; then
+          echo "VPN CONNECTED"
+          break
+        fi
 
-          wait "$BOT_PID"
-          EXIT_CODE=$?
+        if grep -q "AUTH_FAILED" /tmp/openvpn.log; then
+          echo "VPN AUTH FAILED"
+          cat /tmp/openvpn.log
+          exit 1
+        fi
 
-          echo "Scraper finished with code $EXIT_CODE"
-          tail -50 /tmp/scraper.log || true
+        echo "waiting $i"
+        sleep 2
+      done
 
-          exit $EXIT_CODE
+      echo "VPN LOG:"
+      sudo cat /tmp/openvpn.log || true
 
-      # ─── UPLOAD LOG ──────────────────────────────────────────────
-      - name: Upload scraper log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: scraper-log-${{ github.run_id }}
-          path: /tmp/scraper.log
-          retention-days: 7
+  # ───────────────── VERIFY NETWORK ─────────────────
+  - name: Network Diagnostics
+    run: |
+
+      echo "Interfaces:"
+      ip a
+
+      echo "Routes:"
+      ip route
+
+      echo "Public IP:"
+      curl -s http://ip-api.com/json | jq .
+
+  # ───────────────── DOWNLOAD BOT ─────────────────
+  - name: Download Mainbot.py
+    run: |
+      curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot.py -o Mainbot.py
+      ls -lh Mainbot.py
+
+  # ───────────────── RUN SCRAPER ─────────────────
+  - name: Run Scraper
+    run: |
+
+      touch /tmp/scraper.log
+
+      python Mainbot.py > /tmp/scraper.log 2>&1 &
+      BOT_PID=$!
+
+      echo "Bot PID $BOT_PID"
+
+      MINUTES=0
+
+      while kill -0 "$BOT_PID" 2>/dev/null; do
+
+        sleep 300
+
+        MINUTES=$((MINUTES+5))
+
+        echo "Heartbeat $MINUTES minutes"
+
+        tail -3 /tmp/scraper.log || true
+
+      done
+
+      wait "$BOT_PID"
+      EXIT_CODE=$?
+
+      echo "Bot finished"
+
+      tail -50 /tmp/scraper.log
+
+      exit $EXIT_CODE
+
+  # ───────────────── LOG UPLOAD ─────────────────
+  - name: Upload Logs
+    if: always()
+    uses: actions/upload-artifact@v4
+    with:
+      name: scraper-log-${{ github.run_id }}
+      path: /tmp/scraper.log
+```
