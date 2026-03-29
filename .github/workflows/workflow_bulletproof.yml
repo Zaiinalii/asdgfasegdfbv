@@ -151,8 +151,8 @@ jobs:
           echo "🚀 Starting scraper with FULL REAL-TIME LOGS..."
           echo "═══════════════════════════════════════════════"
           
-          # Run in foreground - all output streams directly to GitHub Actions
-          python Mainbot.py 2>&1 | tee /tmp/scraper.log
+          # Run with unbuffered output (-u) so logs appear immediately
+          python -u Mainbot.py 2>&1 | tee /tmp/scraper.log
 
       # ───────── UPLOAD LOG ─────────
       - name: Upload Logs
