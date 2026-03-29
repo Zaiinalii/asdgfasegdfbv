@@ -148,29 +148,11 @@ jobs:
       # ───────── RUN SCRAPER ─────────
       - name: Run Scraper
         run: |
-          touch /tmp/scraper.log
-
-          python Mainbot.py > /tmp/scraper.log 2>&1 &
-          BOT_PID=$!
-
-          echo "Mainbot PID: $BOT_PID"
-
-          MINUTES=0
-
-          while kill -0 "$BOT_PID" 2>/dev/null; do
-            sleep 300
-            MINUTES=$((MINUTES+5))
-            echo "Heartbeat $MINUTES minutes"
-            tail -3 /tmp/scraper.log || true
-          done
-
-          wait "$BOT_PID"
-          EXIT_CODE=$?
-
-          echo "Scraper finished"
-          tail -50 /tmp/scraper.log
-
-          exit $EXIT_CODE
+          echo "🚀 Starting scraper with FULL REAL-TIME LOGS..."
+          echo "═══════════════════════════════════════════════"
+          
+          # Run in foreground - all output streams directly to GitHub Actions
+          python Mainbot.py 2>&1 | tee /tmp/scraper.log
 
       # ───────── UPLOAD LOG ─────────
       - name: Upload Logs
