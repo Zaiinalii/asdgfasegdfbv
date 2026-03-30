@@ -96,11 +96,20 @@ jobs:
           # Step 4: Create OpenVPN config dynamically
           echo "Creating OpenVPN config..."
           sudo mkdir -p /etc/openvpn/pia
-          cat <<EOF | sudo tee /etc/openvpn/pia/pia.ovpn > /dev/null
+
+          # Download correct CA cert for standard encryption (port 1198)
+          curl -s "https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.2048.crt" -o /tmp/pia-ca.crt
+          if [ ! -s /tmp/pia-ca.crt ]; then
+            echo "Failed to download CA cert, trying alternate URL..."
+            curl -s "https://raw.githubusercontent.com/pia-foss/manual-connections/refs/heads/master/ca.rsa.2048.crt" -o /tmp/pia-ca.crt
+          fi
+          echo "CA cert size: $(wc -c < /tmp/pia-ca.crt) bytes"
+
+          sudo bash -c "cat > /etc/openvpn/pia/pia.ovpn" <<OVPNEOF
           client
           dev tun
           proto udp
-          remote $SERVER_IP 1198
+          remote ${SERVER_IP} 1198
           resolv-retry infinite
           nobind
           persist-key
@@ -110,14 +119,17 @@ jobs:
           tls-client
           remote-cert-tls server
           auth-user-pass /etc/openvpn/auth.txt
-          compress
-          verb 1
+          verb 3
           reneg-sec 0
+          verify-x509-name ${SERVER_CN} name
           <ca>
-          $(curl -s "https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt")
+          $(cat /tmp/pia-ca.crt)
           </ca>
-          verify-x509-name $SERVER_CN name
-          EOF
+          OVPNEOF
+
+          echo "Config written. Checking..."
+          sudo head -5 /etc/openvpn/pia/pia.ovpn
+          sudo grep -c "BEGIN CERTIFICATE" /etc/openvpn/pia/pia.ovpn
 
           # Step 5: Create auth file
           echo "$PIA_USER" | sudo tee /etc/openvpn/auth.txt > /dev/null
