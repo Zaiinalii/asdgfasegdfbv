@@ -1,16 +1,16 @@
-name: Fiverr Scraper (NordVPN OpenVPN)
+name: Fiverr HTTP Scraper (No Browser, curl_cffi)
 
 on:
   workflow_dispatch:
     inputs:
-      runner_role:
-        description: "Runner role"
-        required: false
-        default: "scraper"
       preferred_country:
         description: "Preferred VPN country"
         required: false
         default: "us"
+      fetch_gig_pages:
+        description: "Quick View in Phase 1 (true=slow+full data, false=fast)"
+        required: false
+        default: "false"
 
 jobs:
   scrape:
@@ -18,20 +18,15 @@ jobs:
     timeout-minutes: 360
 
     env:
-      DISPLAY: ":99"
+      VPN_ENABLED: "1"
+      SKIP_PHASE2: "false"
+      RUNNER_ROLE: "scraper"
+      PREFERRED_COUNTRY: ${{ github.event.inputs.preferred_country }}
+      FETCH_GIG_PAGES: ${{ github.event.inputs.fetch_gig_pages }}
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      # ───────── DISPLAY ─────────
-      - name: Start Virtual Display
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y xvfb xauth x11-utils
-          Xvfb :99 -screen 0 1920x1080x24 &
-          sleep 2
-          echo "Virtual display started"
 
       # ───────── PYTHON ─────────
       - name: Setup Python
@@ -42,10 +37,7 @@ jobs:
       - name: Install Python Dependencies
         run: |
           pip install --upgrade pip
-          pip install playwright requests certifi "camoufox[geoip]" browserforge
-          python -m playwright install firefox
-          python -m playwright install-deps firefox
-          python -m camoufox fetch
+          pip install curl_cffi requests certifi
 
       # ───────── OPENVPN ─────────
       - name: Install OpenVPN
@@ -140,25 +132,26 @@ jobs:
           fi
 
       # ───────── DOWNLOAD BOT ─────────
-      - name: Download Mainbot.py
+      - name: Download Mainbot_http.py
         run: |
-          curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot.py -o Mainbot.py
-          ls -lh Mainbot.py
+          curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot_http.py -o Mainbot_http.py
+          ls -lh Mainbot_http.py
 
       # ───────── RUN SCRAPER ─────────
       - name: Run Scraper
         run: |
-          echo "🚀 Starting scraper with FULL REAL-TIME LOGS..."
+          echo "🚀 Starting HTTP scraper (Phase 1 → Phase 2)..."
+          echo "   Quick View: $FETCH_GIG_PAGES"
+          echo "   Country: $PREFERRED_COUNTRY"
           echo "═══════════════════════════════════════════════"
           
-          # Run with unbuffered output (-u) so logs appear immediately
-          python -u Mainbot.py 2>&1 | tee /tmp/scraper.log
+          python -u Mainbot_http.py 2>&1 | tee /tmp/scraper.log
 
       # ───────── UPLOAD LOG ─────────
       - name: Upload Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scraper-log-${{ github.run_id }}
+          name: http-scraper-log-${{ github.run_id }}
           path: /tmp/scraper.log
           retention-days: 7
