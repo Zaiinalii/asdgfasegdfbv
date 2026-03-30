@@ -1,12 +1,12 @@
-name: Fiverr HTTP Scraper (No Browser, curl_cffi)
+name: Fiverr HTTP Scraper - PIA VPN (curl_cffi)
 
 on:
   workflow_dispatch:
     inputs:
       preferred_country:
-        description: "Preferred VPN country"
+        description: "PIA VPN region (e.g. us_california, us_east, uk_london, de_berlin)"
         required: false
-        default: "us"
+        default: "us_california"
       fetch_gig_pages:
         description: "Quick View in Phase 1 (true=slow+full data, false=fast)"
         required: false
@@ -43,65 +43,70 @@ jobs:
       - name: Install OpenVPN
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y openvpn jq
+          sudo apt-get install -y openvpn unzip jq
           openvpn --version | head -1
 
-      # ───────── GET SERVER ─────────
-      - name: Fetch NordVPN Server
+      # ───────── PIA CONFIG ─────────
+      - name: Download PIA OpenVPN Configs
         run: |
-          echo "Fetching recommended NordVPN server..."
-
-          SERVER=$(curl -s https://api.nordvpn.com/v1/servers/recommendations | jq -r '.[0].hostname')
-
-          if [ -z "$SERVER" ]; then
-            echo "Failed to fetch NordVPN server"
-            exit 1
-          fi
-
-          echo "Recommended server: $SERVER"
-
-          CONFIG_URL="https://downloads.nordcdn.com/configs/files/ovpn_udp/servers/${SERVER}.udp.ovpn"
-
-          echo "Downloading config: $CONFIG_URL"
-
-          curl -fSL "$CONFIG_URL" -o server.ovpn
-
-          if [ ! -f server.ovpn ]; then
-            echo "VPN config download failed"
-            exit 1
-          fi
+          echo "Downloading PIA OpenVPN configs..."
+          sudo mkdir -p /etc/openvpn/pia
+          sudo curl -fSL -o /tmp/pia.zip https://www.privateinternetaccess.com/openvpn/openvpn-nextgen.zip
+          sudo unzip -o /tmp/pia.zip -d /etc/openvpn/pia
+          
+          CONFIG_COUNT=$(ls /etc/openvpn/pia/*.ovpn 2>/dev/null | wc -l)
+          echo "Downloaded $CONFIG_COUNT PIA region configs"
+          echo "Sample regions:"
+          ls /etc/openvpn/pia/*.ovpn | sed 's#.*/##; s#\.ovpn##' | head -20
+          
+          # Set env vars so Python knows where configs are
+          echo "OPENVPN_CONFIG_DIR=/etc/openvpn/pia" >> $GITHUB_ENV
+          echo "OPENVPN_AUTH_FILE=/etc/openvpn/auth.txt" >> $GITHUB_ENV
 
       # ───────── AUTH FILE ─────────
-      - name: Create NordVPN Auth File
+      - name: Create PIA Auth File
         run: |
-          echo "iUbZfFG7fUys9REFmQpqo3Vm" > auth.txt
-          echo "suen4AmAMuu3HAKjD9RDpdqp" >> auth.txt
-          chmod 600 auth.txt
-          echo "Auth file created"
+          echo "p8158950" | sudo tee /etc/openvpn/auth.txt > /dev/null
+          echo 'GoYoula@niba12$$2323' | sudo tee -a /etc/openvpn/auth.txt > /dev/null
+          sudo chmod 600 /etc/openvpn/auth.txt
+          echo "PIA auth file created at /etc/openvpn/auth.txt"
 
-      # ───────── CONNECT VPN ─────────
-      - name: Connect VPN
+      # ───────── PICK INITIAL SERVER + CONNECT ─────────
+      - name: Connect PIA VPN
         run: |
           sudo modprobe tun || true
+          
+          # Try preferred region first, fallback to random
+          REGION="${{ github.event.inputs.preferred_country }}"
+          INITIAL="/etc/openvpn/pia/${REGION}.ovpn"
+          
+          if [ ! -f "$INITIAL" ]; then
+            echo "Region '$REGION' not found, picking random US region..."
+            INITIAL=$(ls /etc/openvpn/pia/us_*.ovpn 2>/dev/null | shuf -n1)
+            if [ -z "$INITIAL" ]; then
+              INITIAL=$(ls /etc/openvpn/pia/*.ovpn | shuf -n1)
+            fi
+          fi
+          echo "Initial server: $(basename $INITIAL)"
 
           sudo openvpn \
-            --config server.ovpn \
-            --auth-user-pass auth.txt \
+            --config "$INITIAL" \
+            --auth-user-pass /etc/openvpn/auth.txt \
             --auth-nocache \
             --daemon \
             --log /tmp/openvpn.log
 
-          echo "Waiting for VPN..."
+          echo "Waiting for PIA VPN connection..."
 
           for i in $(seq 1 30); do
 
             if sudo grep -q "Initialization Sequence Completed" /tmp/openvpn.log; then
-              echo "VPN CONNECTED"
+              echo "PIA VPN CONNECTED"
               break
             fi
 
             if sudo grep -q "AUTH_FAILED" /tmp/openvpn.log; then
-              echo "VPN AUTH FAILED"
+              echo "PIA VPN AUTH FAILED - check secrets PIA_USERNAME and PIA_PASSWORD"
               sudo cat /tmp/openvpn.log
               exit 1
             fi
@@ -110,8 +115,11 @@ jobs:
             sleep 2
           done
 
-          echo "VPN LOG:"
-          sudo cat /tmp/openvpn.log || true
+          if ! sudo grep -q "Initialization Sequence Completed" /tmp/openvpn.log; then
+            echo "PIA VPN connection timed out"
+            sudo cat /tmp/openvpn.log
+            exit 1
+          fi
 
       # ───────── VERIFY IP ─────────
       - name: Verify VPN IP
@@ -128,7 +136,7 @@ jobs:
             echo "Still using GitHub runner IP (Azure)"
             exit 1
           else
-            echo "VPN active (non-Azure IP)"
+            echo "PIA VPN active (non-Azure IP)"
           fi
 
       # ───────── DOWNLOAD BOT ─────────
@@ -140,10 +148,10 @@ jobs:
       # ───────── RUN SCRAPER ─────────
       - name: Run Scraper
         run: |
-          echo "🚀 Starting HTTP scraper (Phase 1 → Phase 2)..."
+          echo "Starting HTTP scraper (Phase 1 + Phase 2)..."
           echo "   Quick View: $FETCH_GIG_PAGES"
-          echo "   Country: $PREFERRED_COUNTRY"
-          echo "═══════════════════════════════════════════════"
+          echo "   PIA Region: $PREFERRED_COUNTRY"
+          echo "============================================="
           
           python -u Mainbot_http.py 2>&1 | tee /tmp/scraper.log
 
@@ -152,6 +160,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: http-scraper-log-${{ github.run_id }}
+          name: http-scraper-pia-log-${{ github.run_id }}
           path: /tmp/scraper.log
           retention-days: 7
