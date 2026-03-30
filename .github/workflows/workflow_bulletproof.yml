@@ -39,78 +39,116 @@ jobs:
           pip install --upgrade pip
           pip install curl_cffi requests certifi
 
-      # ───────── OPENVPN ─────────
+      # ───────── OPENVPN + DEPS ─────────
       - name: Install OpenVPN
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y openvpn unzip jq
+          sudo apt-get install -y openvpn jq
           openvpn --version | head -1
 
-      # ───────── PIA CONFIG ─────────
-      - name: Download PIA OpenVPN Configs
-        run: |
-          echo "Downloading PIA OpenVPN configs..."
-          sudo mkdir -p /etc/openvpn/pia
-          sudo curl -fSL -o /tmp/pia.zip https://www.privateinternetaccess.com/openvpn/openvpn-nextgen.zip
-          sudo unzip -o /tmp/pia.zip -d /etc/openvpn/pia
-          
-          CONFIG_COUNT=$(ls /etc/openvpn/pia/*.ovpn 2>/dev/null | wc -l)
-          echo "Downloaded $CONFIG_COUNT PIA region configs"
-          echo "Sample regions:"
-          ls /etc/openvpn/pia/*.ovpn | sed 's#.*/##; s#\.ovpn##' | head -20
-          
-          # Set env vars so Python knows where configs are
-          echo "OPENVPN_CONFIG_DIR=/etc/openvpn/pia" >> $GITHUB_ENV
-          echo "OPENVPN_AUTH_FILE=/etc/openvpn/auth.txt" >> $GITHUB_ENV
-
-      # ───────── AUTH FILE ─────────
-      - name: Create PIA Auth File
-        run: |
-          echo "p8158950" | sudo tee /etc/openvpn/auth.txt > /dev/null
-          echo 'GoYoula@niba12$$2323' | sudo tee -a /etc/openvpn/auth.txt > /dev/null
-          sudo chmod 600 /etc/openvpn/auth.txt
-          echo "PIA auth file created at /etc/openvpn/auth.txt"
-
-      # ───────── PICK INITIAL SERVER + CONNECT ─────────
+      # ───────── PIA CONNECT VIA API ─────────
       - name: Connect PIA VPN
         run: |
           sudo modprobe tun || true
-          
-          # Try preferred region first, fallback to random
-          REGION="${{ github.event.inputs.preferred_country }}"
-          INITIAL="/etc/openvpn/pia/${REGION}.ovpn"
-          
-          if [ ! -f "$INITIAL" ]; then
-            echo "Region '$REGION' not found, picking random US region..."
-            INITIAL=$(ls /etc/openvpn/pia/us_*.ovpn 2>/dev/null | shuf -n1)
-            if [ -z "$INITIAL" ]; then
-              INITIAL=$(ls /etc/openvpn/pia/*.ovpn | shuf -n1)
-            fi
-          fi
-          echo "Initial server: $(basename $INITIAL)"
 
+          PIA_USER="p8158950"
+          PIA_PASS='GoYoula@niba12$2323'
+          REGION="${{ github.event.inputs.preferred_country }}"
+
+          # Step 1: Get auth token
+          echo "Getting PIA auth token..."
+          TOKEN_RESPONSE=$(curl -s -u "$PIA_USER:$PIA_PASS" \
+            "https://privateinternetaccess.com/gtoken/generateToken")
+          TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.token')
+
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "AUTH FAILED - check PIA credentials"
+            echo "$TOKEN_RESPONSE"
+            exit 1
+          fi
+          echo "Got PIA token (${#TOKEN} chars)"
+
+          # Step 2: Get server list
+          echo "Fetching PIA server list..."
+          SERVERS=$(curl -s "https://serverlist.piaservers.net/vpninfo/servers/v6")
+          SERVERS_JSON=$(echo "$SERVERS" | head -1)
+
+          # Step 3: Pick server by preferred region or lowest latency US
+          echo "Looking for region: $REGION"
+          SERVER_IP=$(echo "$SERVERS_JSON" | jq -r \
+            --arg region "$REGION" \
+            '.regions[] | select(.id == $region) | .servers.ovpnudp[0].ip' 2>/dev/null)
+          SERVER_CN=$(echo "$SERVERS_JSON" | jq -r \
+            --arg region "$REGION" \
+            '.regions[] | select(.id == $region) | .servers.ovpnudp[0].cn' 2>/dev/null)
+
+          if [ -z "$SERVER_IP" ] || [ "$SERVER_IP" = "null" ]; then
+            echo "Region '$REGION' not found, picking random US server..."
+            PICK=$(echo "$SERVERS_JSON" | jq -r \
+              '[.regions[] | select(.id | startswith("us")) | {id: .id, ip: .servers.ovpnudp[0].ip, cn: .servers.ovpnudp[0].cn}] | .[0]')
+            SERVER_IP=$(echo "$PICK" | jq -r '.ip')
+            SERVER_CN=$(echo "$PICK" | jq -r '.cn')
+            echo "Using fallback US server: $SERVER_IP ($SERVER_CN)"
+          else
+            echo "Using region '$REGION': $SERVER_IP ($SERVER_CN)"
+          fi
+
+          # Step 4: Create OpenVPN config dynamically
+          echo "Creating OpenVPN config..."
+          sudo mkdir -p /etc/openvpn/pia
+          cat <<EOF | sudo tee /etc/openvpn/pia/pia.ovpn > /dev/null
+          client
+          dev tun
+          proto udp
+          remote $SERVER_IP 1198
+          resolv-retry infinite
+          nobind
+          persist-key
+          persist-tun
+          cipher aes-128-gcm
+          auth sha256
+          tls-client
+          remote-cert-tls server
+          auth-user-pass /etc/openvpn/auth.txt
+          compress
+          verb 1
+          reneg-sec 0
+          <ca>
+          $(curl -s "https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.4096.crt")
+          </ca>
+          verify-x509-name $SERVER_CN name
+          EOF
+
+          # Step 5: Create auth file
+          echo "$PIA_USER" | sudo tee /etc/openvpn/auth.txt > /dev/null
+          echo "$PIA_PASS" | sudo tee -a /etc/openvpn/auth.txt > /dev/null
+          sudo chmod 600 /etc/openvpn/auth.txt
+
+          # Set env vars for Python VPN rotation
+          echo "OPENVPN_CONFIG_DIR=/etc/openvpn/pia" >> $GITHUB_ENV
+          echo "OPENVPN_AUTH_FILE=/etc/openvpn/auth.txt" >> $GITHUB_ENV
+          echo "PIA_SERVERS_JSON<<EOFSERVERS" >> $GITHUB_ENV
+          echo "$SERVERS_JSON" | jq -c '[.regions[] | {id: .id, ip: .servers.ovpnudp[0].ip, cn: .servers.ovpnudp[0].cn}]' >> $GITHUB_ENV
+          echo "EOFSERVERS" >> $GITHUB_ENV
+
+          # Step 6: Connect
           sudo openvpn \
-            --config "$INITIAL" \
-            --auth-user-pass /etc/openvpn/auth.txt \
+            --config /etc/openvpn/pia/pia.ovpn \
             --auth-nocache \
             --daemon \
             --log /tmp/openvpn.log
 
           echo "Waiting for PIA VPN connection..."
-
           for i in $(seq 1 30); do
-
             if sudo grep -q "Initialization Sequence Completed" /tmp/openvpn.log; then
               echo "PIA VPN CONNECTED"
               break
             fi
-
             if sudo grep -q "AUTH_FAILED" /tmp/openvpn.log; then
-              echo "PIA VPN AUTH FAILED - check secrets PIA_USERNAME and PIA_PASSWORD"
+              echo "PIA VPN AUTH FAILED"
               sudo cat /tmp/openvpn.log
               exit 1
             fi
-
             echo "Waiting $i"
             sleep 2
           done
