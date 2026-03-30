@@ -73,7 +73,7 @@ jobs:
           SERVERS=$(curl -s "https://serverlist.piaservers.net/vpninfo/servers/v6")
           SERVERS_JSON=$(echo "$SERVERS" | head -1)
 
-          # Step 3: Pick server by preferred region or lowest latency US
+          # Step 3: Pick server by preferred region
           echo "Looking for region: $REGION"
           SERVER_IP=$(echo "$SERVERS_JSON" | jq -r \
             --arg region "$REGION" \
@@ -93,60 +93,117 @@ jobs:
             echo "Using region '$REGION': $SERVER_IP ($SERVER_CN)"
           fi
 
-          # Step 4: Create OpenVPN config dynamically
-          echo "Creating OpenVPN config..."
-          sudo mkdir -p /etc/openvpn/pia
+          # Step 4: Create credentials file (PIA uses token split into 2 halves)
+          sudo mkdir -p /opt/piavpn-manual /etc/openvpn/pia
+          echo "${TOKEN:0:62}" | sudo tee /opt/piavpn-manual/credentials > /dev/null
+          echo "${TOKEN:62}" | sudo tee -a /opt/piavpn-manual/credentials > /dev/null
+          sudo chmod 600 /opt/piavpn-manual/credentials
 
-          # Download correct CA cert for standard encryption (port 1198)
-          curl -s "https://raw.githubusercontent.com/pia-foss/manual-connections/master/ca.rsa.2048.crt" -o /tmp/pia-ca.crt
-          if [ ! -s /tmp/pia-ca.crt ]; then
-            echo "Failed to download CA cert, trying alternate URL..."
-            curl -s "https://raw.githubusercontent.com/pia-foss/manual-connections/refs/heads/master/ca.rsa.2048.crt" -o /tmp/pia-ca.crt
-          fi
-          echo "CA cert size: $(wc -c < /tmp/pia-ca.crt) bytes"
-
-          sudo bash -c "cat > /etc/openvpn/pia/pia.ovpn" <<OVPNEOF
+          # Step 5: Create OpenVPN config (next-gen: port 8080 UDP, aes-256-cbc, RSA 4096 CA)
+          sudo tee /etc/openvpn/pia/pia.ovpn > /dev/null <<'OVPNCFG'
           client
           dev tun
           proto udp
-          remote ${SERVER_IP} 1198
           resolv-retry infinite
           nobind
           persist-key
           persist-tun
-          cipher aes-128-gcm
+          cipher aes-256-cbc
           auth sha256
           tls-client
           remote-cert-tls server
-          auth-user-pass /etc/openvpn/auth.txt
+          auth-user-pass /opt/piavpn-manual/credentials
           verb 3
           reneg-sec 0
-          verify-x509-name ${SERVER_CN} name
+          disable-occ
           <ca>
-          $(cat /tmp/pia-ca.crt)
+          -----BEGIN CERTIFICATE-----
+          MIIHqzCCBZOgAwIBAgIJAJ0u+vODZJntMA0GCSqGSIb3DQEBDQUAMIHoMQswCQYD
+          VQQGEwJVUzELMAkGA1UECBMCQ0ExEzARBgNVBAcTCkxvc0FuZ2VsZXMxIDAeBgNV
+          BAoTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMSAwHgYDVQQLExdQcml2YXRlIElu
+          dGVybmV0IEFjY2VzczEgMB4GA1UEAxMXUHJpdmF0ZSBJbnRlcm5ldCBBY2Nlc3Mx
+          IDAeBgNVBCkTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMS8wLQYJKoZIhvcNAQkB
+          FiBzZWN1cmVAcHJpdmF0ZWludGVybmV0YWNjZXNzLmNvbTAeFw0xNDA0MTcxNzQw
+          MzNaFw0zNDA0MTIxNzQwMzNaMIHoMQswCQYDVQQGEwJVUzELMAkGA1UECBMCQ0Ex
+          EzARBgNVBAcTCkxvc0FuZ2VsZXMxIDAeBgNVBAoTF1ByaXZhdGUgSW50ZXJuZXQg
+          QWNjZXNzMSAwHgYDVQQLExdQcml2YXRlIEludGVybmV0IEFjY2VzczEgMB4GA1UE
+          AxMXUHJpdmF0ZSBJbnRlcm5ldCBBY2Nlc3MxIDAeBgNVBCkTF1ByaXZhdGUgSW50
+          ZXJuZXQgQWNjZXNzMS8wLQYJKoZIhvcNAQkBFiBzZWN1cmVAcHJpdmF0ZWludGVy
+          bmV0YWNjZXNzLmNvbTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBALVk
+          hjumaqBbL8aSgj6xPQqqYbCi6o8L6ZaiKr4mos0LoNGzlfqIH6s8sMJXOBWOITfC
+          PDRKbAkSJhSLe5TS9EFKp5KN/jBmSMD54DW61DB0z9Gq6bVANsMaG7HIBnVlOCBi
+          +OPoG5YkqYPvfFBxX9UN3dVc1S/sDpJY9jAlFBXnAHqSsUj0JmCY3Dkk5Xnr1b4
+          ywByxbsrSuPYoFRMJBRPmSiU5wUDMX0nKPHRSedhvH4n7K9OY6qr7d3m5suOTPO7
+          +LsbhSlGI1mNiSx7Cg6R9sMikhIqd1cMz3pOIzlBrcVd7GAh3GKi3FHryGC22+rkU
+          IThqQxZXl75RhOldsmzKuvfDaHSwYCGW3h06JtbeSfJcd8LXWRWQB0zojSbWh36C
+          HxSLJxJ2pAdrXBpRfQuqCdsDIRiv5nsF36jmYR9J9DEMeHskeKaJppBzA3MH4K/J
+          BhFBz8BQ3D3KZ3lkSnRnG4p2fn6aGBBinzaBByJpIx7L5NhWAaZM/gBJCsCHbbNg
+          aLPaGA5BO7OSFnq8TqlJBkuMqS9FFC3+mXLFM2SFg0oqJKtWFry5wmRg2yOJMJG1
+          STpQHWVYUF6dcNOlLAfJKlN28hs+awEfG97JxSOGBmDIog2mVYsHSm0BR5b2FGCE
+          iE9kReYLAEUPek6z4xhJ6SGWIXE6haMmXEl2to29AgMBAAGjggFUMIIBUDAdBgNV
+          HQ4EFgQUrsRtyWJftjpdRM0+925Y6Cl08SUwggEfBgNVHSMEggEWMIIBEoAUrsRt
+          yWJftjpdRM0+925Y6Cl08SWhge6kgeswgegxCzAJBgNVBAYTAlVTMQswCQYDVQQI
+          EwJDQTETMBEGA1UEBxMKTG9zQW5nZWxlczEgMB4GA1UEChMXUHJpdmF0ZSBJbnRl
+          cm5ldCBBY2Nlc3MxIDAeBgNVBAsTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMSAw
+          HgYDVQQDExdQcml2YXRlIEludGVybmV0IEFjY2VzczEgMB4GA1UEKRMXUHJpdmF0
+          ZSBJbnRlcm5ldCBBY2Nlc3MxLzAtBgkqhkiG9w0BCQEWIHNlY3VyZUBwcml2YXRl
+          aW50ZXJuZXRhY2Nlc3MuY29tggkAnS7684Nkme0wDAYDVR0TBAUwAwEB/zANBgkq
+          hkiG9w0BAQ0FAAOCAgEAJsfhsPk3r8kLXLxY+v+vHzbr4uNtqnL9/1Uuf8NrsCt
+          pXAoyZ0YqfbkWx3NHTZ7OE9ZRhdMP/RqHQE1p4N4Sa1nZKhTKasV6KhHDqSCt/dv
+          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
+          -----END CERTIFICATE-----
           </ca>
-          OVPNEOF
+          OVPNCFG
 
-          echo "Config written. Checking..."
-          sudo head -5 /etc/openvpn/pia/pia.ovpn
+          # Add remote line with selected server
+          sudo sed -i "/^client/a remote ${SERVER_IP} 8080 udp" /etc/openvpn/pia/pia.ovpn
+          # Strip leading whitespace from heredoc
+          sudo sed -i 's/^          //' /etc/openvpn/pia/pia.ovpn
+
+          echo "Config written. Verifying..."
+          sudo grep "remote " /etc/openvpn/pia/pia.ovpn
           sudo grep -c "BEGIN CERTIFICATE" /etc/openvpn/pia/pia.ovpn
-
-          # Step 5: Create auth file
-          echo "$PIA_USER" | sudo tee /etc/openvpn/auth.txt > /dev/null
-          echo "$PIA_PASS" | sudo tee -a /etc/openvpn/auth.txt > /dev/null
-          sudo chmod 600 /etc/openvpn/auth.txt
 
           # Set env vars for Python VPN rotation
           echo "OPENVPN_CONFIG_DIR=/etc/openvpn/pia" >> $GITHUB_ENV
-          echo "OPENVPN_AUTH_FILE=/etc/openvpn/auth.txt" >> $GITHUB_ENV
-          echo "PIA_SERVERS_JSON<<EOFSERVERS" >> $GITHUB_ENV
-          echo "$SERVERS_JSON" | jq -c '[.regions[] | {id: .id, ip: .servers.ovpnudp[0].ip, cn: .servers.ovpnudp[0].cn}]' >> $GITHUB_ENV
-          echo "EOFSERVERS" >> $GITHUB_ENV
+          echo "OPENVPN_AUTH_FILE=/opt/piavpn-manual/credentials" >> $GITHUB_ENV
+          echo "PIA_TOKEN=$TOKEN" >> $GITHUB_ENV
 
           # Step 6: Connect
           sudo openvpn \
             --config /etc/openvpn/pia/pia.ovpn \
-            --auth-nocache \
             --daemon \
             --log /tmp/openvpn.log
 
