@@ -1,4 +1,4 @@
-name: Fiverr HTTP Scraper - PIA VPN (curl_cffi)
+name: Category Keyword Discovery - PIA VPN
 
 on:
   workflow_dispatch:
@@ -7,22 +7,16 @@ on:
         description: "PIA VPN region (e.g. us_california, us_east, uk_london, de_berlin)"
         required: false
         default: "us_california"
-      fetch_gig_pages:
-        description: "Quick View in Phase 1 (true=slow+full data, false=fast)"
-        required: false
-        default: "false"
 
 jobs:
-  scrape:
+  discover:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     env:
       VPN_ENABLED: "1"
-      SKIP_PHASE2: "false"
-      RUNNER_ROLE: "scraper"
-      PREFERRED_COUNTRY: ${{ github.event.inputs.preferred_country }}
-      FETCH_GIG_PAGES: ${{ github.event.inputs.fetch_gig_pages }}
+      GITHUB_TOKEN: ${{ secrets.BOT_STORAGE_TOKEN }}
+      GITHUB_REPO: "Zaiinalii/fiverr-bot-storage"
 
     steps:
       - name: Checkout Repository
@@ -56,8 +50,6 @@ jobs:
 
           CONFIG_COUNT=$(ls /etc/openvpn/pia/*.ovpn 2>/dev/null | wc -l)
           echo "Downloaded $CONFIG_COUNT PIA region configs"
-          echo "Sample regions:"
-          ls /etc/openvpn/pia/*.ovpn | sed 's#.*/##; s#\.ovpn##' | head -20
 
           echo "OPENVPN_CONFIG_DIR=/etc/openvpn/pia" >> $GITHUB_ENV
           echo "OPENVPN_AUTH_FILE=/etc/openvpn/auth.txt" >> $GITHUB_ENV
@@ -117,13 +109,10 @@ jobs:
       - name: Verify VPN IP
         run: |
           echo "Checking IP..."
-
           IP_INFO=$(curl -s http://ip-api.com/json)
-
           echo "$IP_INFO" | jq .
 
           ISP=$(echo "$IP_INFO" | jq -r '.isp')
-
           if echo "$ISP" | grep -qi "microsoft"; then
             echo "Still using GitHub runner IP (Azure)"
             exit 1
@@ -131,27 +120,23 @@ jobs:
             echo "PIA VPN active (non-Azure IP)"
           fi
 
-      # ───────── DOWNLOAD BOT ─────────
-      - name: Download Mainbot_http.py
+      # ───────── DOWNLOAD & RUN ─────────
+      - name: Download category_discovery.py
         run: |
-          curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/Mainbot_http.py -o Mainbot_http.py
-          ls -lh Mainbot_http.py
+          curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/category_discovery.py -o category_discovery.py
+          ls -lh category_discovery.py
 
-      # ───────── RUN SCRAPER ─────────
-      - name: Run Scraper
+      - name: Run Category Discovery
         run: |
-          echo "Starting HTTP scraper (Phase 1 + Phase 2)..."
-          echo "   Quick View: $FETCH_GIG_PAGES"
-          echo "   PIA Region: $PREFERRED_COUNTRY"
+          echo "Starting Category Keyword Discovery..."
           echo "============================================="
-          
-          python -u Mainbot_http.py 2>&1 | tee /tmp/scraper.log
+          python -u category_discovery.py 2>&1 | tee /tmp/discovery.log
 
       # ───────── UPLOAD LOG ─────────
-      - name: Upload Logs
+      - name: Upload Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: http-scraper-pia-log-${{ github.run_id }}
-          path: /tmp/scraper.log
+          name: discovery-log-${{ github.run_id }}
+          path: /tmp/discovery.log
           retention-days: 7
