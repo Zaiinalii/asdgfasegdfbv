@@ -121,16 +121,16 @@ jobs:
           fi
 
       # ───────── DOWNLOAD & RUN ─────────
-      - name: Download category_discovery.py
+      - name: Download category_mainbot.py
         run: |
-          curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/category_discovery.py -o category_discovery.py
-          ls -lh category_discovery.py
+          curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/category_mainbot.py -o category_mainbot.py
+          ls -lh category_mainbot.py
 
       - name: Run Category Discovery
         run: |
           echo "Starting Category Keyword Discovery..."
           echo "============================================="
-          python -u category_discovery.py 2>&1 | tee /tmp/discovery.log
+          python -u category_mainbot.py 2>&1 | tee /tmp/discovery.log
 
       # ───────── UPLOAD LOG ─────────
       - name: Upload Log
