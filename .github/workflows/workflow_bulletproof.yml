@@ -1,4 +1,4 @@
-name: Category Keyword Discovery - PIA VPN
+name: Rescrape Missing Categories - PIA VPN
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         default: "us_california"
 
 jobs:
-  discover:
+  rescrape:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
@@ -121,22 +121,22 @@ jobs:
           fi
 
       # ───────── DOWNLOAD & RUN ─────────
-      - name: Download category_mainbot.py
+      - name: Download rescrape_missing.py
         run: |
-          curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/category_mainbot.py -o category_mainbot.py
-          ls -lh category_mainbot.py
+          curl -fSL https://pub-4e3db5ccea8a4f30ae7d4ee15e71f566.r2.dev/rescrape_missing.py -o rescrape_missing.py
+          ls -lh rescrape_missing.py
 
-      - name: Run Category Discovery
+      - name: Run Rescrape
         run: |
-          echo "Starting Category Keyword Discovery..."
+          echo "Starting Category Re-scrape..."
           echo "============================================="
-          python -u category_mainbot.py 2>&1 | tee /tmp/discovery.log
+          python -u rescrape_missing.py 2>&1 | tee /tmp/rescrape.log
 
       # ───────── UPLOAD LOG ─────────
       - name: Upload Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: discovery-log-${{ github.run_id }}
-          path: /tmp/discovery.log
+          name: rescrape-log-${{ github.run_id }}
+          path: /tmp/rescrape.log
           retention-days: 7
